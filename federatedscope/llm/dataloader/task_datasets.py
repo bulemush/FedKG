@@ -112,8 +112,9 @@ def _build_token_entity_ids_from_align(align_mask):
 def _build_webqsp_sg(item, context_text, tokenizer, config):
     parses = item.get('Parses', item.get('parses', []))
     parse = parses[0] if isinstance(parses, list) and len(parses) > 0 else {}
+    if not isinstance(parse, dict):
+        parse = {}
     entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
-    edge_vocab_size = _kg_vocab_size(config, 'edge_vocab_size', 50000)
 
     topic_mid = parse.get('TopicEntityMid', item.get('topic_entity_mid', ''))
     topic_name = parse.get('TopicEntityName',
@@ -121,6 +122,27 @@ def _build_webqsp_sg(item, context_text, tokenizer, config):
     mention = parse.get('PotentialTopicEntityMention', topic_name)
     chain = parse.get('InferentialChain', [])
     constraints = parse.get('Constraints', [])
+    if chain is None:
+        chain = []
+    elif isinstance(chain, str):
+        chain = [chain] if chain else []
+    elif not isinstance(chain, list):
+        try:
+            chain = list(chain)
+        except TypeError:
+            chain = []
+    chain = [str(relation) for relation in chain if relation not in [None, '']]
+    if constraints is None:
+        constraints = []
+    elif isinstance(constraints, dict):
+        constraints = [constraints]
+    elif not isinstance(constraints, list):
+        try:
+            constraints = list(constraints)
+        except TypeError:
+            constraints = []
+    constraints = [constraint for constraint in constraints
+                   if isinstance(constraint, dict)]
 
     node_specs = [{
         'key': topic_mid or topic_name or 'topic',
