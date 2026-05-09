@@ -58,6 +58,26 @@ def _cast_module_like(module, reference_module):
     return module
 
 
+def _get_module_compute_dtype(module, default=None):
+    dtype, _ = _get_module_dtype_device(module)
+    if dtype is None:
+        return default
+    return dtype
+
+
+def _cast_tensor_for_module(tensor, module, default_dtype=None):
+    if tensor is None or not torch.is_tensor(tensor):
+        return tensor
+    target_dtype = _get_module_compute_dtype(module, default=default_dtype)
+    if target_dtype is None:
+        return tensor
+    if tensor.dtype == target_dtype:
+        return tensor
+    if tensor.dtype.is_floating_point or tensor.dtype.is_complex:
+        return tensor.to(dtype=target_dtype)
+    return tensor
+
+
 def _clone_cfg(cfg):
     if cfg is None:
         return {}
@@ -457,7 +477,11 @@ class KGAdapterInputModule(nn.Module):
     def forward(self, hidden_states, node_states, node_mask=None):
         if node_states is None:
             return hidden_states
-
+        output_dtype = hidden_states.dtype
+        hidden_states = _cast_tensor_for_module(hidden_states, self.entity_proj,
+                                                output_dtype)
+        node_states = _cast_tensor_for_module(node_states, self.entity_proj,
+                                              hidden_states.dtype)
         node_states = self.entity_proj(node_states)
         key_padding_mask = None
         if node_mask is not None:
@@ -473,7 +497,7 @@ class KGAdapterInputModule(nn.Module):
             self.dropout(attn_output)
         hidden_states = hidden_states + torch.sigmoid(self.ffn_gate) * \
             self.dropout(self.ffn(self.ffn_norm(hidden_states)))
-        return hidden_states
+        return hidden_states.to(output_dtype)
 
 
 class KGGraphMessagePassing(nn.Module):
@@ -491,7 +515,12 @@ class KGGraphMessagePassing(nn.Module):
                 edge_mask=None):
         if node_states is None or edge_index is None:
             return node_states
-
+        output_dtype = node_states.dtype
+        node_states = _cast_tensor_for_module(node_states, self.node_proj,
+                                              output_dtype)
+        if edge_states is not None:
+            edge_states = _cast_tensor_for_module(edge_states, self.edge_proj,
+                                                  node_states.dtype)
         batch_size, node_count, hidden_size = node_states.size()
         output = node_states
         for batch_idx in range(batch_size):
@@ -541,7 +570,7 @@ class KGGraphMessagePassing(nn.Module):
                                             updated_nodes,
                                             batch_nodes)
             output[batch_idx] = updated_nodes
-        return output
+        return output.to(output_dtype)
 
 
 class KGTripEncoderMLP(nn.Module):
@@ -559,7 +588,11 @@ class KGTripEncoderMLP(nn.Module):
                 edge_mask=None):
         if node_states is None or edge_states is None or edge_index is None:
             return None, None
-
+        output_dtype = node_states.dtype
+        node_states = _cast_tensor_for_module(node_states, self.mlp,
+                                              output_dtype)
+        edge_states = _cast_tensor_for_module(edge_states, self.mlp,
+                                              node_states.dtype)
         batch_size, _, hidden_size = node_states.size()
         trip_reps = []
         max_trip_num = 0
@@ -591,7 +624,9 @@ class KGTripEncoderMLP(nn.Module):
             tail_states = node_states[batch_idx].index_select(0, dst)
             trip_input = torch.cat([head_states, batch_edge_states, tail_states],
                                    dim=-1)
-            trip_state = self.mlp(trip_input)
+            trip_state = self.mlp(_cast_tensor_for_module(trip_input,
+                                                          self.mlp,
+                                                          node_states.dtype))
             trip_reps.append(trip_state)
             max_trip_num = max(max_trip_num, trip_state.size(0))
 
@@ -610,7 +645,7 @@ class KGTripEncoderMLP(nn.Module):
                 continue
             padded_trips[batch_idx, :trip_state.size(0)] = trip_state
             padded_masks[batch_idx, :trip_state.size(0)] = True
-        return padded_trips, padded_masks
+        return padded_trips.to(output_dtype), padded_masks
 
 
 class KGCrossAttention(nn.Module):
@@ -628,6 +663,11 @@ class KGCrossAttention(nn.Module):
     def forward(self, query_states, context_states, context_mask=None):
         if query_states is None or context_states is None:
             return query_states
+        output_dtype = query_states.dtype
+        query_states = _cast_tensor_for_module(query_states, self.cross_attn,
+                                               output_dtype)
+        context_states = _cast_tensor_for_module(context_states, self.cross_attn,
+                                                 query_states.dtype)
         key_padding_mask = None
         if context_mask is not None:
             key_padding_mask = ~context_mask.bool()
@@ -636,7 +676,7 @@ class KGCrossAttention(nn.Module):
                                          self.context_norm(context_states),
                                          key_padding_mask=key_padding_mask,
                                          need_weights=False)
-        return self.dropout(attn_output)
+        return self.dropout(attn_output).to(output_dtype)
 
 
 class KGReasoningFFN(nn.Module):
@@ -653,7 +693,11 @@ class KGReasoningFFN(nn.Module):
         self._is_fs_kg_trainable_module = True
 
     def forward(self, hidden_states):
-        return hidden_states + self.dropout(self.ffn(self.norm(hidden_states)))
+        output_dtype = hidden_states.dtype
+        hidden_states = _cast_tensor_for_module(hidden_states, self.ffn,
+                                                output_dtype)
+        return (hidden_states +
+                self.dropout(self.ffn(self.norm(hidden_states)))).to(output_dtype)
 
 
 class KGJointReasoningModule(nn.Module):
@@ -677,7 +721,12 @@ class KGJointReasoningModule(nn.Module):
     def forward(self, hidden_states, context_states, context_mask=None):
         if hidden_states is None or context_states is None:
             return hidden_states, context_states
-
+        output_dtype = hidden_states.dtype
+        context_output_dtype = context_states.dtype
+        hidden_states = _cast_tensor_for_module(hidden_states, self.text_down,
+                                                output_dtype)
+        context_states = _cast_tensor_for_module(context_states, self.text_down,
+                                                 hidden_states.dtype)
         text_states = self.text_down(hidden_states)
         updated_context = context_states + torch.sigmoid(self.node_gate) * \
             self.node_from_text(context_states, text_states)
@@ -689,7 +738,8 @@ class KGJointReasoningModule(nn.Module):
 
         fused_hidden = hidden_states + torch.sigmoid(self.output_gate) * \
             self.text_up(updated_text)
-        return fused_hidden, updated_context
+        return fused_hidden.to(output_dtype), updated_context.to(
+            context_output_dtype)
 
 
 class PaperRGATWrapper(nn.Module):
@@ -717,6 +767,12 @@ class PaperRGATWrapper(nn.Module):
                                           edge_states, edge_mask, kg_inputs)
         if flat_graph is None:
             return node_states
+        output_dtype = node_states.dtype
+        flat_graph['x'] = _cast_tensor_for_module(flat_graph['x'], self.conv,
+                                                  output_dtype)
+        if flat_graph['edge_attr'] is not None:
+            flat_graph['edge_attr'] = _cast_tensor_for_module(
+                flat_graph['edge_attr'], self.conv, flat_graph['x'].dtype)
         out, _ = self.conv(flat_graph['x'],
                            flat_graph['edge_index'],
                            flat_graph['edge_type'],
@@ -724,7 +780,7 @@ class PaperRGATWrapper(nn.Module):
                            return_attention_weights=True)
         out = self.output_proj(out)
         return _dense_from_flat(out, flat_graph['batch'], node_mask,
-                                out.size(-1))
+                                out.size(-1)).to(output_dtype)
 
 
 class PaperSRGATWrapper(nn.Module):
@@ -759,6 +815,12 @@ class PaperSRGATWrapper(nn.Module):
                                           edge_states, edge_mask, kg_inputs)
         if flat_graph is None:
             return node_states
+        output_dtype = node_states.dtype
+        flat_graph['x'] = _cast_tensor_for_module(flat_graph['x'], self.conv,
+                                                  output_dtype)
+        if flat_graph['edge_attr'] is not None:
+            flat_graph['edge_attr'] = _cast_tensor_for_module(
+                flat_graph['edge_attr'], self.conv, flat_graph['x'].dtype)
         out, attn_weights = self.conv(flat_graph['x'],
                                       flat_graph['edge_index'],
                                       flat_graph['edge_type'],
@@ -778,7 +840,7 @@ class PaperSRGATWrapper(nn.Module):
                 batch=flat_graph['batch'])
             flat_graph['batch'] = batch
         return _dense_from_flat(out, flat_graph['batch'], node_mask,
-                                out.size(-1))
+                                out.size(-1)).to(output_dtype)
 
 
 class KGHybridEmbedding(nn.Module):
@@ -849,6 +911,7 @@ class KGHybridEmbedding(nn.Module):
 
     def forward(self, input_ids):
         word_embeds = self.base_embedding(input_ids)
+        output_dtype = word_embeds.dtype
         runtime_state = self.runtime.get() if self.runtime is not None else None
         if runtime_state is None or runtime_state.get('kg_inputs') is None:
             return word_embeds
@@ -887,9 +950,21 @@ class KGHybridEmbedding(nn.Module):
             word_embeds.size(1))
         if token_entity_states is not None:
             mixed = torch.sigmoid(self.hybrid_gate) * token_entity_states
-            word_embeds = self.input_norm(word_embeds + mixed)
+            norm_input = word_embeds + mixed
+            norm_input = _cast_tensor_for_module(norm_input, self.input_norm,
+                                                 output_dtype)
+            word_embeds = self.input_norm(norm_input).to(output_dtype)
 
-        return self.input_adapter(word_embeds, node_states, node_mask)
+        adapter_hidden = _cast_tensor_for_module(word_embeds,
+                                                 self.input_adapter,
+                                                 output_dtype)
+        adapter_nodes = node_states
+        if adapter_nodes is not None:
+            adapter_nodes = _cast_tensor_for_module(adapter_nodes,
+                                                    self.input_adapter,
+                                                    adapter_hidden.dtype)
+        return self.input_adapter(adapter_hidden, adapter_nodes,
+                                  node_mask).to(output_dtype)
 
     def _lookup_node_ids(self, kg_inputs, device):
         node_ids = kg_inputs.get('entity_ids', None)
@@ -943,7 +1018,10 @@ class KGHybridEmbedding(nn.Module):
                 subword_embeds.dtype)
             subword_sum = (subword_embeds * subword_mask).sum(dim=-2)
             subword_den = subword_mask.sum(dim=-2).clamp_min(1.0)
-            subword_states = self.subword_entity_proj(subword_sum / subword_den)
+            subword_states = self.subword_entity_proj(
+                _cast_tensor_for_module(subword_sum / subword_den,
+                                        self.subword_entity_proj,
+                                        subword_embeds.dtype))
             if node_states is None:
                 node_states = subword_states
                 node_mask = subword_index.ne(0).any(dim=-1)
@@ -1015,7 +1093,10 @@ class KGHybridEmbedding(nn.Module):
                 subword_embeds.dtype)
             subword_sum = (subword_embeds * subword_mask).sum(dim=-2)
             subword_den = subword_mask.sum(dim=-2).clamp_min(1.0)
-            subword_states = self.subword_edge_proj(subword_sum / subword_den)
+            subword_states = self.subword_edge_proj(
+                _cast_tensor_for_module(subword_sum / subword_den,
+                                        self.subword_edge_proj,
+                                        subword_embeds.dtype))
             if edge_states is None:
                 edge_states = subword_states
                 edge_mask = subword_index.ne(0).any(dim=-1)
@@ -1060,7 +1141,9 @@ class KGHybridEmbedding(nn.Module):
             return None
 
         token_entity_ids = kg_inputs.get('token_entity_ids', None)
-        entity_states = self.entity_to_hidden(entity_states)
+        entity_states = self.entity_to_hidden(
+            _cast_tensor_for_module(entity_states, self.entity_to_hidden,
+                                    entity_states.dtype))
         batch_size, entity_count, hidden_size = entity_states.size()
         if token_entity_ids is None:
             align_mask = _as_tensor(kg_inputs.get('align_mask', None),
