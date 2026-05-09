@@ -36,6 +36,28 @@ def _resolve_cfg_value(cfg, key, default):
     return getattr(cfg, key, default)
 
 
+def _get_module_dtype_device(module):
+    for param in module.parameters():
+        return param.dtype, param.device
+    for buffer in module.buffers():
+        return buffer.dtype, buffer.device
+    return None, None
+
+
+def _cast_module_like(module, reference_module):
+    dtype, device = _get_module_dtype_device(reference_module)
+    if dtype is None and device is None:
+        return module
+    kwargs = {}
+    if device is not None:
+        kwargs['device'] = device
+    if dtype is not None and (dtype.is_floating_point or dtype.is_complex):
+        kwargs['dtype'] = dtype
+    if kwargs:
+        module.to(**kwargs)
+    return module
+
+
 def _clone_cfg(cfg):
     if cfg is None:
         return {}
@@ -788,6 +810,13 @@ class KGHybridEmbedding(nn.Module):
             entity_hidden_size=entity_hidden_size,
             num_heads=num_heads,
             dropout=dropout)
+        _cast_module_like(self.entity_embedding, self.base_embedding)
+        _cast_module_like(self.edge_embedding, self.base_embedding)
+        _cast_module_like(self.subword_entity_proj, self.base_embedding)
+        _cast_module_like(self.subword_edge_proj, self.base_embedding)
+        _cast_module_like(self.entity_to_hidden, self.base_embedding)
+        _cast_module_like(self.input_norm, self.base_embedding)
+        _cast_module_like(self.input_adapter, self.base_embedding)
         self._is_fs_kg_trainable_module = True
 
     def set_fs_kg_trainable(self, is_trainable):
@@ -1135,6 +1164,9 @@ class KGInjectedLayer(nn.Module):
             kg_hidden_size=entity_hidden_size,
             num_heads=num_heads,
             dropout=dropout)
+        _cast_module_like(self.graph_reasoner, self.base_layer)
+        _cast_module_like(self.trip_encoder, self.base_layer)
+        _cast_module_like(self.joint_reasoning, self.base_layer)
         self._is_fs_kg_trainable_module = True
 
     def set_fs_kg_trainable(self, is_trainable):
