@@ -96,7 +96,8 @@ def get_dataloader(dataset, config, split='train'):
         model_name, _ = _parse_model_type(config.model.type)
         tokenizer, _ = get_tokenizer(model_name, config.data.root,
                                      config.llm.tok_len)
-        data_collator = LLMDataCollator(tokenizer=tokenizer)
+        data_collator = LLMDataCollator(tokenizer=tokenizer,
+                                        kg_adapter_cfg=config.llm.kg_adapter)
         filtered_args['collate_fn'] = data_collator
 
     dataloader = loader_cls(dataset, **filtered_args)

@@ -73,6 +73,11 @@ class LLMDataset(Dataset):
         self.labels = data_dict["labels"]
 
         self.tokenizer = tokenizer
+        self.extra_fields = {}
+        for field in ['kg_inputs', 'sg']:
+            field_values = [example.get(field, None) for example in list_data_dict]
+            if any(value is not None for value in field_values):
+                self.extra_fields[field] = field_values
 
         categories = [
             example['category'] if 'category' in example else None
@@ -123,9 +128,13 @@ class LLMDataset(Dataset):
         return len(self.input_ids)
 
     def __getitem__(self, i):
-        return dict(input_ids=self.input_ids[i],
+        item = dict(input_ids=self.input_ids[i],
                     labels=self.labels[i],
                     categories=self.categories[i])
+        for field, values in self.extra_fields.items():
+            if values[i] is not None:
+                item[field] = values[i]
+        return item
 
     # def overwrite_by_llm(self, i):
     #     source = self.sources[i]

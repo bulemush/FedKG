@@ -8,6 +8,8 @@ import torch.nn as nn
 from transformers import (OPTForCausalLM, GPT2LMHeadModel, BloomForCausalLM,
                           LlamaForCausalLM)
 from federatedscope.llm.model.adapter_builder import AdapterModel
+from federatedscope.llm.kg_adapter import maybe_prepare_kg_adapters, \
+    set_kg_modules_trainable
 from federatedscope.llm.offsite_tuning.kd_trainer import KDTrainer
 from federatedscope.core.auxiliaries.data_builder import get_data
 
@@ -201,6 +203,8 @@ def generate_emulator_and_adapter(model: AdapterModel,
                                   **kwargs):
     layers = get_layers(model)
     l, r = max(emulator_l, 0), min(emulator_r, len(layers) - 1)
+    maybe_prepare_kg_adapters(model, l, r)
+    layers = get_layers(model)
 
     # make all parameters on raw model untrainable
     for module in model.modules():
@@ -239,6 +243,7 @@ def generate_emulator_and_adapter(model: AdapterModel,
         new_model.adapter,
         name_pattern=new_model.trainable_param_name_pattern,
         is_trainable=True)
+    set_kg_modules_trainable(new_model, True)
     # make the emulator untrainable on clients' models
     convert_layers_train_state(new_model.student, is_trainable=False)
 
@@ -252,7 +257,12 @@ def convert_layers_train_state(layers, name_pattern=None, is_trainable=True):
     if is_trainable:
         for layer in layers:
             for name, param in layer.named_parameters():
-                if name_pattern is None or name_pattern in name:
+                if name_pattern is None:
+                    param.requires_grad = True
+                elif isinstance(name_pattern, (list, tuple, set)):
+                    param.requires_grad = any(
+                        pattern in name for pattern in name_pattern)
+                elif name_pattern in name:
                     param.requires_grad = True
                 else:
                     param.requires_grad = False
@@ -327,6 +337,7 @@ def align_student_with_teacher(raw_model, adap_model, cfg, device, monitor):
 
     # Make adapter un-trainable
     convert_layers_train_state(adap_model.adapter, is_trainable=False)
+    set_kg_modules_trainable(adap_model, False)
 
     # Make student trainable
     convert_layers_train_state(
@@ -361,6 +372,7 @@ def align_student_with_teacher(raw_model, adap_model, cfg, device, monitor):
         adap_model.adapter,
         name_pattern=adap_model.trainable_param_name_pattern,
         is_trainable=True)
+    set_kg_modules_trainable(adap_model, True)
 
     # Make student un-trainable
     convert_layers_train_state(adap_model.student, is_trainable=False)

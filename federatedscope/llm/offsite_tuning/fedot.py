@@ -10,6 +10,7 @@ from federatedscope.llm.offsite_tuning.client import OffsiteTuningClient
 from federatedscope.core.auxiliaries.utils import add_prefix_to_path
 from federatedscope.llm.offsite_tuning.utils import \
     build_cfg_for_alignment, convert_layers_train_state
+from federatedscope.llm.kg_adapter import set_kg_modules_trainable
 from federatedscope.llm.trainer.bilevel_OT_trainer import \
     OTTrainer_server, OTTrainer_client
 
@@ -74,6 +75,7 @@ class FedOT_Server(OffsiteTuningServer):
     def _emulator_fine_tuning(self):
         # make the adapter untrainable and the emulator trainable
         convert_layers_train_state(self.model.adapter, is_trainable=False)
+        set_kg_modules_trainable(self.model, False)
         convert_layers_train_state(
             self.model.student,
             name_pattern=self.model.trainable_param_name_pattern,
@@ -87,6 +89,7 @@ class FedOT_Server(OffsiteTuningServer):
             self.model.adapter,
             name_pattern=self.model.trainable_param_name_pattern,
             is_trainable=True)
+        set_kg_modules_trainable(self.model, True)
         convert_layers_train_state(self.model.student, is_trainable=False)
 
 

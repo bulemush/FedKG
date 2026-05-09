@@ -1,0 +1,215 @@
+{
+  "context": "Question: what is the name of justin bieber brother\nAnswer:",
+  "target": "Jaxon Bieber",
+  "category": "webquestionssp",
+  "raw_question": "what is the name of justin bieber brother?",
+  "processed_question": "what is the name of justin bieber brother",
+  "question_id": "WebQTrn-0",
+  "parse_id": "WebQTrn-0.P0",
+  "topic_entity_mid": "m.06w2sn5",
+  "topic_entity_name": "Justin Bieber",
+  "inferential_chain": [
+    "people.person.sibling_s",
+    "people.sibling_relationship.sibling"
+  ],
+  "answers": [
+    "Jaxon Bieber"
+  ],
+  "sparql": "PREFIX ns: <http://rdf.freebase.com/ns/> SELECT DISTINCT ?x WHERE { FILTER (?x != ns:m.06w2sn5) FILTER (!isLiteral(?x) OR lang(?x) = '' OR langMatches(lang(?x), 'en')) ns:m.06w2sn5 ns:people.person.sibling_s ?y . ?y ns:people.sibling_relationship.sibling ?x . ?x ns:people.person.gender ns:m.05zppz . }",
+  "sg_readable": {
+    "nodes": [
+      {
+        "idx": 0,
+        "mid": "m.06w2sn5",
+        "name": "Justin Bieber",
+        "kind": "topic_entity"
+      },
+      {
+        "idx": 1,
+        "mid": "var:y",
+        "name": "Sibling relation node",
+        "kind": "intermediate_variable"
+      },
+      {
+        "idx": 2,
+        "mid": "m.0gxnnwq",
+        "name": "Jaxon Bieber",
+        "kind": "answer_entity"
+      },
+      {
+        "idx": 3,
+        "mid": "m.05zppz",
+        "name": "Male",
+        "kind": "constraint_entity"
+      }
+    ],
+    "edges": [
+      {
+        "src": 0,
+        "dst": 1,
+        "relation": "people.person.sibling_s"
+      },
+      {
+        "src": 1,
+        "dst": 2,
+        "relation": "people.sibling_relationship.sibling"
+      },
+      {
+        "src": 2,
+        "dst": 3,
+        "relation": "people.person.gender"
+      }
+    ]
+  },
+  "sg": {
+    "node_ids": [
+      1001,
+      1002,
+      1003,
+      1004
+    ],
+    "node_type": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "edge_index": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        1,
+        2,
+        3
+      ]
+    ],
+    "edge_type": [
+      2001,
+      2002,
+      2003
+    ],
+    "nid2swid": [
+      [
+        7,
+        8
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ]
+    ],
+    "eid2swid": [
+      [
+        0
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ]
+    ],
+    "token_entity_ids": [
+      [
+        -1
+      ],
+      [
+        -1
+      ],
+      [
+        -1
+      ],
+      [
+        -1
+      ],
+      [
+        -1
+      ],
+      [
+        -1
+      ],
+      [
+        -1
+      ],
+      [
+        0
+      ],
+      [
+        0
+      ],
+      [
+        -1
+      ]
+    ],
+    "align_mask": [
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        0,
+        0
+      ],
+      [
+        1,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0
+      ]
+    ]
+  }
+}

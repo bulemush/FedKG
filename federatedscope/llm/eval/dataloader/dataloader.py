@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from federatedscope.llm.dataset.llm_dataset import DefaultToken, \
     LLMDataset, PROMPT_DICT
 from federatedscope.core.data.utils import download_url
+from federatedscope.llm.dataloader.task_datasets import \
+    load_complexwebquestions_llm_dataset, load_webquestionssp_llm_dataset
+from federatedscope.llm.kg_adapter.data_utils import build_kg_batch
 from federatedscope.llm.model.model_builder import get_llm
 
 logger = logging.getLogger(__name__)
@@ -24,6 +27,7 @@ class LLMDataCollator(object):
     """Collate examples for supervised fine-tuning."""
 
     tokenizer: transformers.PreTrainedTokenizer
+    kg_adapter_cfg: object = None
 
     def __call__(self, instances):
         input_ids, labels = tuple([instance[key] for instance in instances]
@@ -36,11 +40,19 @@ class LLMDataCollator(object):
             labels,
             batch_first=True,
             padding_value=DefaultToken.IGNORE_INDEX.value)
-        return dict(
+        batch = dict(
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
+        kg_batch = build_kg_batch(instances,
+                                  input_ids,
+                                  pad_id=self.tokenizer.pad_token_id,
+                                  kg_cfg=self.kg_adapter_cfg)
+        if kg_batch is not None:
+            batch['kg_inputs'] = kg_batch
+            batch['sg'] = kg_batch
+        return batch
 
 
 @dataclass
@@ -48,6 +60,7 @@ class LLMRewardCollator():
     """Collate examples for supervised fine-tuning."""
 
     tokenizer: transformers.PreTrainedTokenizer
+    kg_adapter_cfg: object = None
 
     def __call__(self, instances):
         win_data, lose_data = \
@@ -56,7 +69,8 @@ class LLMRewardCollator():
 
         # Form a concatenated dataset
         concat_data = win_data + lose_data
-        concat_data_collator = LLMDataCollator(tokenizer=self.tokenizer)
+        concat_data_collator = LLMDataCollator(
+            tokenizer=self.tokenizer, kg_adapter_cfg=self.kg_adapter_cfg)
         concat_data_dict = concat_data_collator(concat_data)
 
         return dict(
@@ -198,6 +212,7 @@ def load_json(file_path,
     # Replace key
     new_list_data_dict = []
     for item in list_data_dict:
+        consumed_keys = {instruction, input, output, category}
         new_item = dict(
             instruction=item[instruction] if instruction in item else None,
             input=item[input] if input in item else None,
@@ -205,6 +220,10 @@ def load_json(file_path,
             category=item[category] if category in item else None)
         for key, value in kwargs.items():
             new_item[key] = item[value]
+            consumed_keys.add(value)
+        for key, value in item.items():
+            if key not in consumed_keys and key not in new_item:
+                new_item[key] = value
         new_list_data_dict.append(new_item)
     return new_list_data_dict
 
@@ -222,13 +241,19 @@ def load_jsonl(file_path,
     open_func = open if not is_gzip else gzip.open
     with open_func(file_path, 'r') as f:
         for line in f:
-            item = new_dict(json.loads(line))
+            raw_item = json.loads(line)
+            item = new_dict(raw_item)
+            consumed_keys = {instruction, input, output, category}
             new_item = dict(instruction=item[instruction],
                             input=item[input],
                             output=item[output],
                             category=item[category])
             for key, value in kwargs.items():
                 new_item[key] = item[value]
+                consumed_keys.add(value)
+            for key, value in raw_item.items():
+                if key not in consumed_keys and key not in new_item:
+                    new_item[key] = value
             item = new_item
             list_data_dict.append(item)
     return list_data_dict
@@ -313,6 +338,12 @@ def load_llm_dataset(config=None, **kwargs):
             list_data_dict[i]['output'] = \
                 list_data_dict[i]['output'].replace('####', 'The answer is')
         dataset = LLMDataset(list_data_dict, tokenizer)
+
+    elif dataset_name.lower() in ['webquestionssp', 'webqsp']:
+        dataset = load_webquestionssp_llm_dataset(config, tokenizer)
+
+    elif dataset_name.lower() in ['complexwebquestions', 'cwq']:
+        dataset = load_complexwebquestions_llm_dataset(config, tokenizer)
 
     elif dataset_name.lower() == 'code_search_net':
         from federatedscope.llm.dataset.code_search_net import \

@@ -142,4 +142,5 @@ dmypy.json
 /exp
 
 # No new scripts 
-/scripts_*
+/scripts_*data/CWQ/web_snippets_test.json.zip
+data/CWQ/web_snippets_dev.json.zip

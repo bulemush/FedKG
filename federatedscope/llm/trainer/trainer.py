@@ -167,6 +167,34 @@ class LLMTrainer(GeneralTorchTrainer):
         batch_device = self._get_batch_device(ctx, model=model)
         return [ctx.data_batch[key].to(batch_device) for key in keys]
 
+    def _move_batch_value(self, value, device):
+        if torch.is_tensor(value):
+            return value.to(device)
+        if isinstance(value, dict):
+            return {
+                key: self._move_batch_value(item, device)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._move_batch_value(item, device) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._move_batch_value(item, device) for item in value)
+        if hasattr(value, 'to') and callable(value.to):
+            try:
+                return value.to(device)
+            except TypeError:
+                return value
+        return value
+
+    def _prepare_optional_model_kwargs(self, ctx, model=None):
+        batch_device = self._get_batch_device(ctx, model=model)
+        model_kwargs = {}
+        for key in ['kg_inputs', 'sg']:
+            if key in ctx.data_batch:
+                model_kwargs[key] = self._move_batch_value(
+                    ctx.data_batch[key], batch_device)
+        return model_kwargs
+
     def _release_batch_tensors(self, ctx):
         for key, value in ctx.data_batch.items():
             if torch.is_tensor(value):
@@ -320,16 +348,19 @@ class LLMTrainer(GeneralTorchTrainer):
     def _hook_on_batch_forward(self, ctx):
         input_ids, labels, attention_mask = self._prepare_batch_inputs(
             ctx, ['input_ids', 'labels', 'attention_mask'])
+        optional_kwargs = self._prepare_optional_model_kwargs(ctx)
 
         if ctx.cfg.llm.deepspeed.use:
             outputs = ctx.model_engine(input_ids=input_ids,
                                        labels=labels,
-                                       attention_mask=attention_mask)
+                                       attention_mask=attention_mask,
+                                       **optional_kwargs)
 
         else:
             outputs = ctx.model(input_ids=input_ids,
                                 labels=labels,
-                                attention_mask=attention_mask)
+                                attention_mask=attention_mask,
+                                **optional_kwargs)
 
         logits = outputs.logits
         loss = outputs.loss

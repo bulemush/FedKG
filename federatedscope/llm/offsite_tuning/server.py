@@ -100,8 +100,7 @@ class OffsiteTuningServer(Server):
             self.model.to('cpu')
             new_raw_model_state_dict = self.raw_model.state_dict(
                 return_trainable=False)
-            for key, value in zip(self.raw_model.adapter.state_dict().keys(),
-                                  self.model.adapter.state_dict().values()):
+            for key, value in self.model.state_dict().items():
                 new_raw_model_state_dict[key] = value
             self.raw_model_trainer.update(new_raw_model_state_dict,
                                           strict=False)

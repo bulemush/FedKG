@@ -61,6 +61,30 @@ def extend_llm_cfg(cfg):
     cfg.llm.adapter.mv_to_cpu = False
 
     # ---------------------------------------------------------------------- #
+    # KG-Adapter related options
+    # ---------------------------------------------------------------------- #
+    cfg.llm.kg_adapter = CN(new_allowed=True)
+    cfg.llm.kg_adapter.use = False
+    cfg.llm.kg_adapter.entity_vocab_size = 1
+    cfg.llm.kg_adapter.edge_vocab_size = 1
+    cfg.llm.kg_adapter.entity_hidden_size = 256
+    cfg.llm.kg_adapter.num_heads = 4
+    cfg.llm.kg_adapter.dropout = 0.0
+    cfg.llm.kg_adapter.gnn_backend = 'paper'
+    cfg.llm.kg_adapter.paper_gnn_path = ''
+    cfg.llm.kg_adapter.use_srgat = False
+    cfg.llm.kg_adapter.num_relations = 1
+    cfg.llm.kg_adapter.keep_ratio = 1.0
+    cfg.llm.kg_adapter.max_node_num_per_batch = 2500
+    cfg.llm.kg_adapter.use_edge_emb = True
+    cfg.llm.kg_adapter.use_gnn = True
+    cfg.llm.kg_adapter.use_trips = True
+    cfg.llm.kg_adapter.use_joint_reasoning = True
+    cfg.llm.kg_adapter.layer_indices = []
+    # If > 0, only inject into the last N adapter-side transformer blocks.
+    cfg.llm.kg_adapter.adapter_last_n = 0
+
+    # ---------------------------------------------------------------------- #
     # Offsite-tuning related options
     # ---------------------------------------------------------------------- #
     cfg.llm.offsite_tuning = CN()
@@ -104,7 +128,9 @@ def extend_llm_cfg(cfg):
     cfg.llm.offsite_tuning.emu_align.train.local_update_steps = 10
     cfg.llm.offsite_tuning.emu_align.train.initial_update_rounds = 50
     cfg.llm.offsite_tuning.emu_align.train.batch_or_epoch = 'batch'
-    cfg.llm.offsite_tuning.emu_align.train.lm_loss_weight = 0.1
+    # Keep for backward compatibility. Emulator distillation follows the
+    # FedBiOT paper and does not use a ground-truth LM loss by default.
+    cfg.llm.offsite_tuning.emu_align.train.lm_loss_weight = 0.0
     cfg.llm.offsite_tuning.emu_align.train.kd_loss_weight = 0.9
 
     cfg.llm.offsite_tuning.emu_align.train.optimizer = CN(new_allowed=True)

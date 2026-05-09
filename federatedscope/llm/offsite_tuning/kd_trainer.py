@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import logging
 import copy
 
@@ -112,6 +113,26 @@ def get_kd_loss(loss_fn, raw_model, adap_model, layerwise_distill=False):
     return kd_loss
 
 
+def get_kd_kl_divergence(raw_model, student_outputs, input_ids,
+                         attention_mask, **model_kwargs):
+    with torch.no_grad():
+        raw_model.eval()
+        teacher_outputs = raw_model(input_ids=input_ids,
+                                    attention_mask=attention_mask,
+                                    **model_kwargs)
+
+    student_logits = student_outputs.logits
+    teacher_logits = teacher_outputs.logits.to(student_logits.device)
+
+    if torch.equal(student_logits, teacher_logits):
+        return student_logits.new_tensor(0.0)
+
+    numel = teacher_logits.shape[0] * teacher_logits.shape[1]
+    kl_loss_func = torch.nn.KLDivLoss(reduction='sum')
+    return kl_loss_func(F.log_softmax(student_logits, dim=2),
+                        F.softmax(teacher_logits, dim=2)) / numel
+
+
 class KDTrainer(LLMTrainer):
     def __init__(self,
                  raw_model,
@@ -127,10 +148,19 @@ class KDTrainer(LLMTrainer):
         if not config.llm.accelerator.use and \
                 not self._model_has_device_map(self.ctx.raw_model):
             self.ctx.raw_model = self.ctx.raw_model.to(device)
-        self.lm_loss_weight = \
-            config.llm.offsite_tuning.emu_align.train.lm_loss_weight
         self.kd_loss_weight = \
             config.llm.offsite_tuning.emu_align.train.kd_loss_weight
+        self.layerwise_distill = \
+            config.llm.offsite_tuning.emu_align.layerwise_distill
+        self.kl_divergence = \
+            config.llm.offsite_tuning.emu_align.kl_divergence
+        self.sim_loss = config.llm.offsite_tuning.emu_align.sim_loss
+        lm_loss_weight = \
+            config.llm.offsite_tuning.emu_align.train.lm_loss_weight
+        if lm_loss_weight:
+            logger.warning('`emu_align.train.lm_loss_weight` is ignored in '
+                           'KDTrainer because emulator distillation follows '
+                           'the FedBiOT paper objective: L2 + beta * KL.')
 
     def _hook_on_fit_start_numerical_precision(self, ctx):
         super(KDTrainer, self)._hook_on_fit_start_numerical_precision(ctx)
@@ -153,17 +183,48 @@ class KDTrainer(LLMTrainer):
     def _hook_on_batch_forward(self, ctx):
         input_ids, labels, attention_mask = self._prepare_batch_inputs(
             ctx, ['input_ids', 'labels', 'attention_mask'])
+        optional_kwargs = self._prepare_optional_model_kwargs(ctx)
 
         outputs = ctx.model(input_ids=input_ids,
                             labels=labels,
-                            attention_mask=attention_mask)
+                            attention_mask=attention_mask,
+                            **optional_kwargs)
 
         logits = outputs.logits
-        kd_loss = self.kd_loss_weight * get_kd_loss(l2_norm, ctx.raw_model,
-                                                    ctx.model)
-        kd_loss = kd_loss.to(outputs.loss.device)
-        lm_loss = self.lm_loss_weight * outputs.loss
-        loss = kd_loss + lm_loss
+        if self.sim_loss == 'l2':
+            kd_loss_l2 = get_kd_loss(l2_norm,
+                                     ctx.raw_model,
+                                     ctx.model,
+                                     self.layerwise_distill)
+        elif self.sim_loss == 'cos':
+            cos = torch.nn.CosineSimilarity(dim=2)
+            kd_loss_l2 = -get_kd_loss(cos,
+                                      ctx.raw_model,
+                                      ctx.model,
+                                      self.layerwise_distill)
+        else:
+            logger.warning(f'Unknown sim_loss `{self.sim_loss}`, set to zero.')
+            kd_loss_l2 = outputs.loss.new_tensor(0.0)
+
+        kd_loss_l2 = kd_loss_l2.to(outputs.loss.device)
+
+        if self.kl_divergence == 'raw':
+            kd_loss_kl = get_kd_kl_divergence(ctx.raw_model,
+                                              outputs,
+                                              input_ids,
+                                              attention_mask,
+                                              **optional_kwargs)
+        else:
+            logger.warning('Unsupported kl_divergence `%s`, fallback to raw.',
+                           self.kl_divergence)
+            kd_loss_kl = get_kd_kl_divergence(ctx.raw_model,
+                                              outputs,
+                                              input_ids,
+                                              attention_mask,
+                                              **optional_kwargs)
+
+        kd_loss_kl = kd_loss_kl.to(kd_loss_l2.device)
+        loss = kd_loss_l2 + self.kd_loss_weight * kd_loss_kl
 
         if torch.isnan(loss):
             ctx.skip_this_batch = CtxVar(True, LIFECYCLE.BATCH)
@@ -179,4 +240,6 @@ class KDTrainer(LLMTrainer):
         ctx.loss_batch = CtxVar(loss, LIFECYCLE.BATCH)
         ctx.batch_size = CtxVar(len(labels), LIFECYCLE.BATCH)
 
-        logger.info(f'lm_loss: {lm_loss.item()}, kd loss: {kd_loss.item()}')
+        logger.info(f'kd_loss: {loss.item()} '
+                    f'({self.sim_loss}: {kd_loss_l2.item()}, '
+                    f'kl: {kd_loss_kl.item()})')

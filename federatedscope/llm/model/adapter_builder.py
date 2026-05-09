@@ -3,6 +3,9 @@ import torch.nn as nn
 from collections import OrderedDict
 from peft import get_peft_model, TaskType, PeftModel
 
+from federatedscope.llm.kg_adapter import maybe_activate_runtime, \
+    maybe_clear_runtime, set_kg_modules_trainable
+
 import accelerate
 from accelerate import dispatch_model, infer_auto_device_map, \
     load_checkpoint_and_dispatch
@@ -171,6 +174,7 @@ class AdapterModel(nn.Module):
         super().__init__()
 
         self.model = None
+        self.adapter_names = []
         try:
             self.model_unit = MODEL_UNIT[type(model)]
         except:
@@ -198,14 +202,46 @@ class AdapterModel(nn.Module):
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
-    def forward(self, disable_adapter=False, *args, **kwargs):
-        if isinstance(self.model, PeftModel) and disable_adapter:
-            with self.model.disable_adapter():
-                return self.model(*args, **kwargs)
+    def _collect_trainable_patterns(self):
+        patterns = []
+        if isinstance(self.model, PeftModel):
+            patterns.append(self.model.active_adapter)
 
-        return self.model.forward(*args, **kwargs)
+        extra_patterns = getattr(self, 'extra_trainable_param_patterns', [])
+        if isinstance(extra_patterns, str):
+            extra_patterns = [extra_patterns]
+        patterns.extend(extra_patterns)
+        return [pattern for pattern in patterns if pattern]
+
+    def forward(self, disable_adapter=False, *args, **kwargs):
+        kg_inputs = kwargs.pop('kg_inputs', None)
+        sg = kwargs.pop('sg', None)
+        input_ids = kwargs.get('input_ids', None)
+        attention_mask = kwargs.get('attention_mask', None)
+        maybe_activate_runtime(self,
+                               kg_inputs=kg_inputs,
+                               sg=sg,
+                               input_ids=input_ids,
+                               attention_mask=attention_mask)
+        try:
+            if isinstance(self.model, PeftModel) and disable_adapter:
+                with self.model.disable_adapter():
+                    return self.model(*args, **kwargs)
+
+            return self.model.forward(*args, **kwargs)
+        finally:
+            maybe_clear_runtime(self)
 
     def generate(self, disable_adapter=False, *args, **kwargs):
+        kg_inputs = kwargs.pop('kg_inputs', None)
+        sg = kwargs.pop('sg', None)
+        input_ids = kwargs.get('input_ids', None)
+        attention_mask = kwargs.get('attention_mask', None)
+        maybe_activate_runtime(self,
+                               kg_inputs=kg_inputs,
+                               sg=sg,
+                               input_ids=input_ids,
+                               attention_mask=attention_mask)
         try:
             if isinstance(self.model, PeftModel) and disable_adapter:
                 with self.model.disable_adapter():
@@ -226,6 +262,8 @@ class AdapterModel(nn.Module):
                     res = self.model.generate(*args, **kwargs)
             else:
                 raise RuntimeError(e)
+        finally:
+            maybe_clear_runtime(self)
         return res
 
     def state_dict(self, return_trainable=True, *args, **kwargs):
@@ -238,13 +276,15 @@ class AdapterModel(nn.Module):
         return self.model.load_state_dict(state_dict, strict=False)
 
     def get_trainable_state_dict(self):
+        trainable_patterns = self._collect_trainable_patterns()
         grad_params = []
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 grad_params.append(name)
-            # Special case for multiple adapters
-            for adap_name in self.adapter_names:
-                if (adap_name in name) and (name not in grad_params):
+                continue
+
+            for pattern in trainable_patterns:
+                if (pattern in name) and (name not in grad_params):
                     grad_params.append(name)
                     break
         model_state_dict = self.model.state_dict()
@@ -382,9 +422,12 @@ class AdapterModel(nn.Module):
 
     @property
     def trainable_param_name_pattern(self):
-        if isinstance(self.model, PeftModel):
-            return self.model.active_adapter
-        return None
+        patterns = self._collect_trainable_patterns()
+        if len(patterns) == 0:
+            return None
+        if len(patterns) == 1:
+            return patterns[0]
+        return patterns
 
     def set_trainable_modules(self, modules=None):
         # First, set all modules to untrainable
@@ -411,8 +454,18 @@ class AdapterModel(nn.Module):
         for module in trainable_modules:
             for layer in module:
                 for name, param in layer.named_parameters():
-                    if pattern is None or pattern in name:
+                    if pattern is None:
                         param.requires_grad = True
+                    elif isinstance(pattern, (list, tuple, set)):
+                        param.requires_grad = any(
+                            token in name for token in pattern)
+                    elif pattern in name:
+                        param.requires_grad = True
+                    else:
+                        param.requires_grad = False
+
+    def set_kg_trainable(self, is_trainable=True):
+        set_kg_modules_trainable(self.model, is_trainable)
 
     # TODO: Fix `__getattr__`
     # def __getattr__(self, item):

@@ -21,13 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def replace_adapter(target_model, src_model):
-    assert hasattr(target_model, 'adapter') and hasattr(src_model, 'adapter')
-    assert len(target_model.adapter) == len(src_model.adapter)
-
-    for target_layer, src_layer in zip(target_model.adapter,
-                                       src_model.adapter):
-        target_layer.load_state_dict(src_layer.state_dict())
-
+    target_model.load_state_dict(src_model.state_dict(), strict=False)
     return target_model
 
 
@@ -135,11 +129,12 @@ def get_kd_loss(loss_fn, raw_model, adap_model, layerwise_distill=False):
 
 
 def get_kd_kl_divergence(teacher_model: AdapterModel, student_outputs,
-                         input_ids, attention_mask):
+                         input_ids, attention_mask, **model_kwargs):
     with torch.no_grad():
         teacher_model.eval()
         teacher_outputs = teacher_model(input_ids=input_ids,
-                                        attention_mask=attention_mask)
+                                        attention_mask=attention_mask,
+                                        **model_kwargs)
     # student_outputs = student_model(input_ids=input_ids,
     #                                 attention_mask=attention_mask)
     '''
@@ -238,8 +233,7 @@ class OTTrainer_server(LLMTrainer):
                  monitor=None):
         super(OTTrainer_server, self).__init__(adapter_model, data, device,
                                                config, only_for_eval, monitor)
-        self.ctx.raw_model_adapter = copy.deepcopy(
-            raw_model.adapter.state_dict())
+        self.ctx.raw_model_trainable = copy.deepcopy(raw_model.state_dict())
         self.ctx.raw_model = raw_model
         if not config.llm.accelerator.use and \
                 not self._model_has_device_map(self.ctx.raw_model):
@@ -289,30 +283,37 @@ class OTTrainer_server(LLMTrainer):
     def _hook_on_batch_forward(self, ctx):
         input_ids, labels, attention_mask = self._prepare_batch_inputs(
             ctx, ['input_ids', 'labels', 'attention_mask'])
+        optional_kwargs = self._prepare_optional_model_kwargs(ctx)
 
         # ctx.model.eval()
         # logger.info(ctx.model.state_dict().keys())
         outputs = ctx.model(input_ids=input_ids,
                             labels=labels,
-                            attention_mask=attention_mask)
+                            attention_mask=attention_mask,
+                            **optional_kwargs)
 
         # load back origin adapter
-        self.ctx.raw_model.adapter.load_state_dict(self.ctx.raw_model_adapter)
+        self.ctx.raw_model.load_state_dict(self.ctx.raw_model_trainable,
+                                           strict=False)
         # find the difference with the raw model
         raw_input_ids, _, raw_attention_mask = self._prepare_batch_inputs(
             ctx, ['input_ids', 'labels', 'attention_mask'],
             model=self.ctx.raw_model)
+        raw_optional_kwargs = self._prepare_optional_model_kwargs(
+            ctx, model=self.ctx.raw_model)
         raw_loss = get_kd_kl_divergence(self.ctx.raw_model, outputs,
-                                        raw_input_ids, raw_attention_mask)
+                                        raw_input_ids, raw_attention_mask,
+                                        **raw_optional_kwargs)
 
         # load new adapter
-        self.ctx.raw_model.adapter.load_state_dict(
-            ctx.model.adapter.state_dict())
+        self.ctx.raw_model.load_state_dict(ctx.model.state_dict(),
+                                           strict=False)
         # Calculate an overall gap loss based on the entire model
         if self.kl_divergence == 'raw':
             gap_loss_kl = get_kd_kl_divergence(self.ctx.raw_model, outputs,
                                                raw_input_ids,
-                                               raw_attention_mask)
+                                               raw_attention_mask,
+                                               **raw_optional_kwargs)
         else:
             student_logps = _get_batch_logps(outputs.logits,
                                              labels,
@@ -322,7 +323,8 @@ class OTTrainer_server(LLMTrainer):
                 teacher_outputs = self.ctx.raw_model(
                     input_ids=raw_input_ids,
                     labels=labels.to(raw_input_ids.device),
-                    attention_mask=raw_attention_mask)
+                    attention_mask=raw_attention_mask,
+                    **raw_optional_kwargs)
                 teacher_logps = _get_batch_logps(teacher_outputs.logits,
                                                  labels,
                                                  average_log_prob=True)

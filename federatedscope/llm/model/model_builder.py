@@ -1,4 +1,5 @@
 import os
+import copy
 
 from federatedscope.llm.model.adapter_builder import AdapterModel
 from federatedscope.core.configs.config import global_cfg
@@ -105,6 +106,7 @@ def get_llm(config, load_from_prev_ckpt=False, **kwargs):
     args = config.llm.adapter.args[0] if len(
         config.llm.adapter.args[0]) > 0 else {}
     model = AdapterModel(model, use_adapter=config.llm.adapter.use, **args)
+    model.kg_adapter_cfg = copy.deepcopy(config.llm.kg_adapter)
     if config.llm.adapter.use and config.llm.adapter.local_only:
         model.append_adapters(adapter_names=[
             f'Adapter_{i+1}' for i in range(config.federate.client_num)
