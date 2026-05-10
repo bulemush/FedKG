@@ -55,6 +55,7 @@ def extend_llm_cfg(cfg):
     cfg.llm.model_parallel.use = False
     cfg.llm.model_parallel.device_map = 'auto'
     cfg.llm.model_parallel.same_device_map = True
+    cfg.llm.model_parallel.coexisting_model_ratio = 0.45
 
     # ---------------------------------------------------------------------- #
     # Adapters for LLM

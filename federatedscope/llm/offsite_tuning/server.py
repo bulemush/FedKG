@@ -10,7 +10,8 @@ from federatedscope.core.workers.server import Server
 
 from federatedscope.llm.offsite_tuning.utils import \
     generate_adap_model, align_student_with_teacher
-from federatedscope.llm.model.adapter_builder import maybe_shard_model
+from federatedscope.llm.model.adapter_builder import maybe_shard_model, \
+    _scale_max_memory
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +36,27 @@ class OffsiteTuningServer(Server):
         adap_model = generate_adap_model(model, config.llm.offsite_tuning)
         shared_device_map = None
         if getattr(config.llm.model_parallel, 'use', False):
-            model = maybe_shard_model(model, config)
+            shard_max_memory = getattr(config.llm.model_parallel,
+                                       'max_memory',
+                                       None)
+            if config.llm.offsite_tuning.emu_align.use and \
+                    config.llm.offsite_tuning.emu_align.initial_only:
+                coexist_ratio = float(
+                    getattr(config.llm.model_parallel,
+                            'coexisting_model_ratio',
+                            0.45))
+                shard_max_memory = _scale_max_memory(shard_max_memory,
+                                                     coexist_ratio)
+            model = maybe_shard_model(model,
+                                      config,
+                                      max_memory=shard_max_memory)
             if getattr(config.llm.model_parallel, 'same_device_map', True) and \
                     hasattr(model, 'get_device_map'):
                 shared_device_map = model.get_device_map()
             adap_model = maybe_shard_model(adap_model,
                                            config,
-                                           device_map=shared_device_map)
+                                           device_map=shared_device_map,
+                                           max_memory=shard_max_memory)
         # Emulator alignment
         if config.llm.offsite_tuning.emu_align.use and \
                 config.llm.offsite_tuning.emu_align.initial_only:

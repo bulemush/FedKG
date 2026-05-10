@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from collections import OrderedDict
+import re
 from peft import get_peft_model, TaskType, PeftModel
 
 from federatedscope.llm.kg_adapter import maybe_activate_runtime, \
@@ -103,7 +104,32 @@ def _cfg_get(cfg, key, default=None):
     return getattr(cfg, key, default)
 
 
-def maybe_shard_model(model, cfg, device_map=None):
+def _scale_memory_value(value, factor):
+    if value in [None, '']:
+        return value
+    if isinstance(value, (int, float)):
+        return type(value)(value * factor)
+    if isinstance(value, str):
+        matched = re.match(r'^\s*([0-9]*\.?[0-9]+)\s*([A-Za-z]+)\s*$', value)
+        if matched is not None:
+            amount = float(matched.group(1)) * factor
+            unit = matched.group(2)
+            amount_str = f'{amount:.2f}'.rstrip('0').rstrip('.')
+            return f'{amount_str}{unit}'
+    return value
+
+
+def _scale_max_memory(max_memory, factor):
+    max_memory = _normalize_max_memory(max_memory)
+    if max_memory is None or factor in [None, 1, 1.0]:
+        return max_memory
+    return {
+        key: _scale_memory_value(value, factor)
+        for key, value in max_memory.items()
+    }
+
+
+def maybe_shard_model(model, cfg, device_map=None, max_memory=None):
     if model is None or not hasattr(model, 'sharding'):
         return model
     model_parallel_cfg = _cfg_get(getattr(cfg, 'llm', None), 'model_parallel',
@@ -113,7 +139,8 @@ def maybe_shard_model(model, cfg, device_map=None):
         return model
     if device_map is None:
         device_map = _cfg_get(model_parallel_cfg, 'device_map', 'auto')
-    max_memory = _cfg_get(model_parallel_cfg, 'max_memory', None)
+    if max_memory is None:
+        max_memory = _cfg_get(model_parallel_cfg, 'max_memory', None)
     model.sharding(device_map=device_map, max_memory=max_memory)
     return model
 
