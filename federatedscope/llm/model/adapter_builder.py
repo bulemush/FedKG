@@ -52,10 +52,15 @@ def _normalize_device_map(device_map):
     if isinstance(device_map, str):
         return device_map
     if hasattr(device_map, 'items') and not isinstance(device_map, dict):
-        device_map = dict(device_map.items())
+        device_map = {
+            key: value for key, value in device_map.items()
+            if not str(key).startswith('__')
+        }
     if isinstance(device_map, dict):
         normalized = {}
         for key, value in device_map.items():
+            if str(key).startswith('__'):
+                continue
             if isinstance(key, str) and key.isdigit():
                 key = int(key)
             normalized[key] = value
@@ -67,10 +72,15 @@ def _normalize_max_memory(max_memory):
     if max_memory in [None, '', {}]:
         return None
     if hasattr(max_memory, 'items') and not isinstance(max_memory, dict):
-        max_memory = dict(max_memory.items())
+        max_memory = {
+            key: value for key, value in max_memory.items()
+            if not str(key).startswith('__')
+        }
     if isinstance(max_memory, dict):
         normalized = {}
         for key, value in max_memory.items():
+            if str(key).startswith('__'):
+                continue
             if isinstance(key, str) and key.isdigit():
                 key = int(key)
             normalized[key] = value
