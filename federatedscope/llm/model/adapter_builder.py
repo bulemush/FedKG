@@ -46,6 +46,61 @@ sys.setrecursionlimit(100000)
 logger = logging.getLogger(__name__)
 
 
+def _normalize_device_map(device_map):
+    if device_map in [None, '', 'none']:
+        return None
+    if isinstance(device_map, str):
+        return device_map
+    if hasattr(device_map, 'items') and not isinstance(device_map, dict):
+        device_map = dict(device_map.items())
+    if isinstance(device_map, dict):
+        normalized = {}
+        for key, value in device_map.items():
+            if isinstance(key, str) and key.isdigit():
+                key = int(key)
+            normalized[key] = value
+        return normalized
+    return device_map
+
+
+def _normalize_max_memory(max_memory):
+    if max_memory in [None, '', {}]:
+        return None
+    if hasattr(max_memory, 'items') and not isinstance(max_memory, dict):
+        max_memory = dict(max_memory.items())
+    if isinstance(max_memory, dict):
+        normalized = {}
+        for key, value in max_memory.items():
+            if isinstance(key, str) and key.isdigit():
+                key = int(key)
+            normalized[key] = value
+        return normalized
+    return max_memory
+
+
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def maybe_shard_model(model, cfg, device_map=None):
+    if model is None or not hasattr(model, 'sharding'):
+        return model
+    model_parallel_cfg = _cfg_get(getattr(cfg, 'llm', None), 'model_parallel',
+                                  None)
+    use_model_parallel = bool(_cfg_get(model_parallel_cfg, 'use', False))
+    if not use_model_parallel and device_map is None:
+        return model
+    if device_map is None:
+        device_map = _cfg_get(model_parallel_cfg, 'device_map', 'auto')
+    max_memory = _cfg_get(model_parallel_cfg, 'max_memory', None)
+    model.sharding(device_map=device_map, max_memory=max_memory)
+    return model
+
+
 def enable_adapter(model, package, adapter, **kwargs):
     adapter = adapter.lower()
     if package == 'peft':
@@ -318,21 +373,39 @@ class AdapterModel(nn.Module):
 
         return None
 
-    def sharding(self, device_map=None):
-        if device_map is not None:
+    def sharding(self, device_map=None, max_memory=None):
+        device_map = _normalize_device_map(device_map)
+        max_memory = _normalize_max_memory(max_memory)
+        if isinstance(device_map, dict):
             self.device_map = dict(device_map)
+        elif isinstance(device_map, str) and device_map not in ['auto']:
+            raise ValueError(f'Unsupported device_map strategy: {device_map}')
         elif hasattr(self, 'device_map') is False:
             current_map = getattr(self.model, 'hf_device_map', None)
             if isinstance(current_map, dict):
                 self.device_map = dict(current_map)
                 return
 
-            max_memory = get_balanced_memory(
+            if max_memory is None:
+                max_memory = get_balanced_memory(
+                    self.model,
+                    max_memory=None,
+                    no_split_module_classes=self.model_unit,
+                    low_zero=False,
+                )
+            self.device_map = infer_auto_device_map(
                 self.model,
-                max_memory=None,
+                max_memory=max_memory,
                 no_split_module_classes=self.model_unit,
-                low_zero=False,
             )
+        elif isinstance(device_map, str) and device_map == 'auto':
+            if max_memory is None:
+                max_memory = get_balanced_memory(
+                    self.model,
+                    max_memory=None,
+                    no_split_module_classes=self.model_unit,
+                    low_zero=False,
+                )
             self.device_map = infer_auto_device_map(
                 self.model,
                 max_memory=max_memory,

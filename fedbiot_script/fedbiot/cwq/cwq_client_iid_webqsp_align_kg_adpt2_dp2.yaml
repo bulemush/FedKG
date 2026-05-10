@@ -24,6 +24,11 @@ llm:
   tok_len: 800
   chat:
     max_len: 300
+  model_parallel:
+    use: True
+    device_map: 'auto'
+    same_device_map: True
+    max_memory: {0: '21GiB', 1: '21GiB', 2: '21GiB', 3: '21GiB'}
   adapter:
     use: True
     args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05 } ]

@@ -49,6 +49,14 @@ def extend_llm_cfg(cfg):
     cfg.llm.accelerator.config = ''
 
     # ---------------------------------------------------------------------- #
+    # Model parallel related options
+    # ---------------------------------------------------------------------- #
+    cfg.llm.model_parallel = CN(new_allowed=True)
+    cfg.llm.model_parallel.use = False
+    cfg.llm.model_parallel.device_map = 'auto'
+    cfg.llm.model_parallel.same_device_map = True
+
+    # ---------------------------------------------------------------------- #
     # Adapters for LLM
     # ---------------------------------------------------------------------- #
     cfg.llm.adapter = CN()

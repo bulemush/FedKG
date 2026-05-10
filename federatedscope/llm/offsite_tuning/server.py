@@ -10,6 +10,7 @@ from federatedscope.core.workers.server import Server
 
 from federatedscope.llm.offsite_tuning.utils import \
     generate_adap_model, align_student_with_teacher
+from federatedscope.llm.model.adapter_builder import maybe_shard_model
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,15 @@ class OffsiteTuningServer(Server):
                  **kwargs):
         logger.info('Server: Generating emulator and adapter...')
         adap_model = generate_adap_model(model, config.llm.offsite_tuning)
+        shared_device_map = None
+        if getattr(config.llm.model_parallel, 'use', False):
+            model = maybe_shard_model(model, config)
+            if getattr(config.llm.model_parallel, 'same_device_map', True) and \
+                    hasattr(model, 'get_device_map'):
+                shared_device_map = model.get_device_map()
+            adap_model = maybe_shard_model(adap_model,
+                                           config,
+                                           device_map=shared_device_map)
         # Emulator alignment
         if config.llm.offsite_tuning.emu_align.use and \
                 config.llm.offsite_tuning.emu_align.initial_only:

@@ -25,7 +25,8 @@ from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
 from federatedscope.core.auxiliaries.ReIterator import ReIterator
 from federatedscope.core.auxiliaries.optimizer_builder import get_optimizer
 from federatedscope.core.auxiliaries.scheduler_builder import get_scheduler
-from federatedscope.llm.model.adapter_builder import AdapterModel
+from federatedscope.llm.model.adapter_builder import AdapterModel, \
+    maybe_shard_model
 from federatedscope.llm.dataloader.dataloader import get_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,7 @@ class LLMTrainer(GeneralTorchTrainer):
     #             ctx.model.to(torch.bfloat16)
 
     def _hook_on_fit_start_init(self, ctx):
+        maybe_shard_model(ctx.model, ctx.cfg)
         if ctx.cfg.llm.accelerator.use:
             # prepare model sharding
             ctx.model.sharding()

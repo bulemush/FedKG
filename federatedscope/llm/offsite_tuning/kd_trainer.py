@@ -4,6 +4,7 @@ import logging
 import copy
 
 from federatedscope.llm.trainer.trainer import LLMTrainer
+from federatedscope.llm.model.adapter_builder import maybe_shard_model
 from federatedscope.core.trainers.context import CtxVar
 from federatedscope.core.trainers.enums import LIFECYCLE
 
@@ -169,6 +170,15 @@ class KDTrainer(LLMTrainer):
 
     def _hook_on_fit_start_init(self, ctx):
         super()._hook_on_fit_start_init(ctx)
+
+        shared_device_map = None
+        same_device_map = bool(
+            getattr(ctx.cfg.llm.model_parallel, 'same_device_map', True))
+        if same_device_map and hasattr(ctx.model, 'get_device_map'):
+            shared_device_map = ctx.model.get_device_map()
+        maybe_shard_model(self.ctx.raw_model,
+                          ctx.cfg,
+                          device_map=shared_device_map)
 
         if ctx.cfg.llm.accelerator.use:
             self.ctx.raw_model.sharding()
