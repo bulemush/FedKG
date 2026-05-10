@@ -129,6 +129,10 @@ def _scale_max_memory(max_memory, factor):
     }
 
 
+def _ceil_div(a, b):
+    return (a + b - 1) // b
+
+
 def maybe_shard_model(model, cfg, device_map=None, max_memory=None):
     if model is None or not hasattr(model, 'sharding'):
         return model
@@ -417,9 +421,88 @@ class AdapterModel(nn.Module):
 
         return None
 
+    def _find_module_name(self, target_module):
+        if target_module is None:
+            return None
+        for name, module in self.model.named_modules():
+            if module is target_module:
+                return name
+        return None
+
+    def _infer_balanced_layer_device_map(self, max_memory=None):
+        layers = self.layers
+        if not isinstance(layers, nn.ModuleList):
+            return None
+
+        layer_prefix = self._find_module_name(layers)
+        if layer_prefix in [None, '']:
+            return None
+
+        if max_memory is not None:
+            device_ids = sorted([
+                key for key in max_memory.keys() if isinstance(key, int)
+            ])
+        else:
+            device_ids = list(range(torch.cuda.device_count()))
+        if len(device_ids) == 0:
+            return None
+
+        transformer_prefix = layer_prefix.rsplit('.', 1)[0]
+        root_prefix = transformer_prefix.rsplit('.', 1)[0] \
+            if '.' in transformer_prefix else ''
+
+        module_names = {
+            name for name, _ in self.model.named_modules()
+        }
+
+        input_embedding_name = self._find_module_name(self.get_input_embeddings())
+        if input_embedding_name is None:
+            candidate = f'{transformer_prefix}.embed_tokens'
+            if candidate in module_names:
+                input_embedding_name = candidate
+
+        output_embedding_name = None
+        if hasattr(self.model, 'get_output_embeddings'):
+            try:
+                output_embedding_name = self._find_module_name(
+                    self.model.get_output_embeddings())
+            except Exception:
+                output_embedding_name = None
+        if output_embedding_name is None:
+            candidate = f'{root_prefix}.lm_head' if root_prefix else 'lm_head'
+            if candidate in module_names:
+                output_embedding_name = candidate
+
+        final_norm_name = None
+        candidate = f'{transformer_prefix}.norm'
+        if candidate in module_names:
+            final_norm_name = candidate
+
+        device_map = {}
+        first_device = device_ids[0]
+        last_device = device_ids[-1]
+        if input_embedding_name is not None:
+            device_map[input_embedding_name] = first_device
+
+        total_layers = len(layers)
+        layers_per_device = _ceil_div(total_layers, len(device_ids))
+        for idx in range(total_layers):
+            device_idx = min(idx // layers_per_device, len(device_ids) - 1)
+            device_map[f'{layer_prefix}.{idx}'] = device_ids[device_idx]
+
+        if final_norm_name is not None:
+            device_map[final_norm_name] = last_device
+        if output_embedding_name is not None:
+            device_map[output_embedding_name] = last_device
+        return device_map
+
     def sharding(self, device_map=None, max_memory=None):
         device_map = _normalize_device_map(device_map)
         max_memory = _normalize_max_memory(max_memory)
+        if isinstance(device_map, str) and device_map == 'balanced_layers':
+            device_map = self._infer_balanced_layer_device_map(max_memory)
+            if device_map is None:
+                device_map = 'auto'
         existing_map = getattr(self, 'device_map', None)
         if isinstance(existing_map, dict) and isinstance(device_map, dict):
             if dict(existing_map) == dict(device_map):
