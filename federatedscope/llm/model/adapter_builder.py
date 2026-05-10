@@ -79,11 +79,18 @@ def _normalize_max_memory(max_memory):
     if isinstance(max_memory, dict):
         normalized = {}
         for key, value in max_memory.items():
-            if str(key).startswith('__'):
+            key_str = str(key)
+            if key_str.startswith('__'):
+                continue
+            if isinstance(key, int):
+                normalized[key] = value
                 continue
             if isinstance(key, str) and key.isdigit():
-                key = int(key)
-            normalized[key] = value
+                normalized[int(key)] = value
+                continue
+            if key_str in ['cpu', 'disk', 'mps']:
+                normalized[key_str] = value
+                continue
         return normalized
     return max_memory
 
