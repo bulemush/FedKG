@@ -420,12 +420,20 @@ class AdapterModel(nn.Module):
     def sharding(self, device_map=None, max_memory=None):
         device_map = _normalize_device_map(device_map)
         max_memory = _normalize_max_memory(max_memory)
+        existing_map = getattr(self, 'device_map', None)
+        if isinstance(existing_map, dict) and isinstance(device_map, dict):
+            if dict(existing_map) == dict(device_map):
+                return
+        current_map = getattr(self.model, 'hf_device_map', None)
+        if isinstance(current_map, dict) and isinstance(device_map, dict):
+            if dict(current_map) == dict(device_map):
+                self.device_map = dict(device_map)
+                return
         if isinstance(device_map, dict):
             self.device_map = dict(device_map)
         elif isinstance(device_map, str) and device_map not in ['auto']:
             raise ValueError(f'Unsupported device_map strategy: {device_map}')
         elif hasattr(self, 'device_map') is False:
-            current_map = getattr(self.model, 'hf_device_map', None)
             if isinstance(current_map, dict):
                 self.device_map = dict(current_map)
                 return
@@ -456,7 +464,6 @@ class AdapterModel(nn.Module):
                 no_split_module_classes=self.model_unit,
             )
 
-        current_map = getattr(self.model, 'hf_device_map', None)
         if isinstance(current_map, dict) and current_map == self.device_map:
             return
 

@@ -176,9 +176,13 @@ class KDTrainer(LLMTrainer):
             getattr(ctx.cfg.llm.model_parallel, 'same_device_map', True))
         if same_device_map and hasattr(ctx.model, 'get_device_map'):
             shared_device_map = ctx.model.get_device_map()
-        maybe_shard_model(self.ctx.raw_model,
-                          ctx.cfg,
-                          device_map=shared_device_map)
+        raw_model_map = None
+        if hasattr(self.ctx.raw_model, 'get_device_map'):
+            raw_model_map = self.ctx.raw_model.get_device_map()
+        if raw_model_map is None:
+            maybe_shard_model(self.ctx.raw_model,
+                              ctx.cfg,
+                              device_map=shared_device_map)
 
         if ctx.cfg.llm.accelerator.use:
             self.ctx.raw_model.sharding()
