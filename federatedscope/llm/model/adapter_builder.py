@@ -51,6 +51,12 @@ sys.setrecursionlimit(100000)
 logger = logging.getLogger(__name__)
 
 
+def _visible_cuda_device_ids():
+    if not torch.cuda.is_available():
+        return set()
+    return set(range(torch.cuda.device_count()))
+
+
 def _normalize_device_map(device_map):
     if device_map in [None, '', 'none']:
         return None
@@ -63,11 +69,20 @@ def _normalize_device_map(device_map):
         }
     if isinstance(device_map, dict):
         normalized = {}
+        visible_device_ids = _visible_cuda_device_ids()
         for key, value in device_map.items():
             if str(key).startswith('__'):
                 continue
             if isinstance(key, str) and key.isdigit():
                 key = int(key)
+            if isinstance(value, str) and value.isdigit():
+                value = int(value)
+            if isinstance(key, int) and visible_device_ids and \
+                    key not in visible_device_ids:
+                continue
+            if isinstance(value, int) and visible_device_ids and \
+                    value not in visible_device_ids:
+                continue
             normalized[key] = value
         return normalized
     return device_map
@@ -83,20 +98,34 @@ def _normalize_max_memory(max_memory):
         }
     if isinstance(max_memory, dict):
         normalized = {}
+        visible_device_ids = _visible_cuda_device_ids()
         for key, value in max_memory.items():
             key_str = str(key)
             if key_str.startswith('__'):
                 continue
             if isinstance(key, int):
+                if visible_device_ids and key not in visible_device_ids:
+                    logger.warning(
+                        'Ignore max_memory for cuda:%s because it is not '
+                        'visible. CUDA_VISIBLE_DEVICES exposes logical GPUs '
+                        '%s.', key, sorted(visible_device_ids))
+                    continue
                 normalized[key] = value
                 continue
             if isinstance(key, str) and key.isdigit():
-                normalized[int(key)] = value
+                logical_id = int(key)
+                if visible_device_ids and logical_id not in visible_device_ids:
+                    logger.warning(
+                        'Ignore max_memory for cuda:%s because it is not '
+                        'visible. CUDA_VISIBLE_DEVICES exposes logical GPUs '
+                        '%s.', logical_id, sorted(visible_device_ids))
+                    continue
+                normalized[logical_id] = value
                 continue
             if key_str in ['cpu', 'disk', 'mps']:
                 normalized[key_str] = value
                 continue
-        return normalized
+        return normalized if len(normalized) > 0 else None
     return max_memory
 
 

@@ -28,7 +28,6 @@ llm:
     use: True
     device_map: 'balanced_layers'
     same_device_map: False
-    max_memory: {'0': '14GiB', '1': '22GiB', '2': '22GiB', '3': '22GiB'}
   adapter:
     use: True
     args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05 } ]
