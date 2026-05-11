@@ -137,6 +137,58 @@ def _ceil_div(a, b):
     return (a + b - 1) // b
 
 
+def _get_module_device(module):
+    for param in module.parameters(recurse=False):
+        return param.device
+
+    for buffer in module.buffers(recurse=False):
+        return buffer.device
+
+    for param in module.parameters(recurse=True):
+        return param.device
+
+    for buffer in module.buffers(recurse=True):
+        return buffer.device
+
+    return None
+
+
+def _move_tensors_to_device(value, device):
+    if device is None:
+        return value
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, tuple):
+        return tuple(_move_tensors_to_device(item, device)
+                     for item in value)
+    if isinstance(value, list):
+        return [_move_tensors_to_device(item, device) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _move_tensors_to_device(item, device)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _wrap_forward_to_own_device(module):
+    if getattr(module, '_fs_forward_inputs_device_aligned', False):
+        return
+
+    forward_attr = '_old_forward' if callable(
+        getattr(module, '_old_forward', None)) else 'forward'
+    old_forward = getattr(module, forward_attr)
+
+    def device_aligned_forward(*args, **kwargs):
+        module_device = _get_module_device(module)
+        args = _move_tensors_to_device(args, module_device)
+        kwargs = _move_tensors_to_device(kwargs, module_device)
+        return old_forward(*args, **kwargs)
+
+    setattr(module, forward_attr, device_aligned_forward)
+    module._fs_forward_inputs_device_aligned = True
+
+
 def maybe_shard_model(model, cfg, device_map=None, max_memory=None):
     if model is None or not hasattr(model, 'sharding'):
         return model
@@ -560,6 +612,12 @@ class AdapterModel(nn.Module):
                                         force_hooks=True)
         except TypeError:
             self.model = dispatch_model(self.model, device_map=self.device_map)
+        self._align_forward_inputs_to_module_devices()
+
+    def _align_forward_inputs_to_module_devices(self):
+        for module in self.model.modules():
+            if callable(getattr(module, '_old_forward', None)):
+                _wrap_forward_to_own_device(module)
 
     def get_input_device(self):
         input_embeddings = self.get_input_embeddings()

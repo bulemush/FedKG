@@ -27,7 +27,7 @@ llm:
   model_parallel:
     use: True
     device_map: 'balanced_layers'
-    same_device_map: True
+    same_device_map: False
     max_memory: {'0': '21GiB', '1': '21GiB', '2': '21GiB', '3': '21GiB'}
   adapter:
     use: True
