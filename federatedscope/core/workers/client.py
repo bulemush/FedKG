@@ -2,6 +2,7 @@ import copy
 import logging
 import sys
 import pickle
+import torch
 
 from federatedscope.core.message import Message
 from federatedscope.core.communication import StandaloneCommManager, \
@@ -16,6 +17,21 @@ from federatedscope.core.workers.base_client import BaseClient
 logger = logging.getLogger(__name__)
 if get_ds_rank() == 0:
     logger.setLevel(logging.INFO)
+
+
+def _detach_to_cpu(content):
+    if torch.is_tensor(content):
+        return content.detach().cpu().clone()
+    if isinstance(content, dict):
+        return {
+            key: _detach_to_cpu(value)
+            for key, value in content.items()
+        }
+    if isinstance(content, list):
+        return [_detach_to_cpu(value) for value in content]
+    if isinstance(content, tuple):
+        return tuple(_detach_to_cpu(value) for value in content)
+    return copy.deepcopy(content)
 
 
 class Client(BaseClient):
@@ -348,7 +364,9 @@ class Client(BaseClient):
                 sample_size, model_para_all, results = self.trainer.train()
                 if self._cfg.federate.share_local_model and not \
                         self._cfg.federate.online_aggr:
-                    model_para_all = copy.deepcopy(model_para_all)
+                    model_para_all = _detach_to_cpu(model_para_all)
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                 train_log_res = self._monitor.format_eval_res(
                     results,
                     rnd=self.state,

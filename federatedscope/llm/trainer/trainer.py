@@ -448,9 +448,20 @@ class LLMTrainer(GeneralTorchTrainer):
                         p.grad.data = p.grad.to('cpu')
 
         if hasattr(ctx, 'optimizer') and ctx.optimizer is not None:
+            try:
+                ctx.optimizer.zero_grad(set_to_none=True)
+            except TypeError:
+                ctx.optimizer.zero_grad()
+            if hasattr(ctx.optimizer, 'state'):
+                ctx.optimizer.state.clear()
             del ctx.optimizer
         if hasattr(ctx, 'scheduler') and ctx.scheduler is not None:
             del ctx.scheduler
+
+        for key in ['loss_batch', 'loss_task', 'loss_regular', 'y_prob',
+                    'y_true', 'data_batch', 'batch_size']:
+            if key in ctx:
+                del ctx[key]
 
         # free the space
         gc.collect()
