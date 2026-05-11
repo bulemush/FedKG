@@ -72,7 +72,7 @@ class OffsiteTuningServer(Server):
             model = maybe_shard_model(model,
                                       config,
                                       max_memory=shard_max_memory)
-            if getattr(config.llm.model_parallel, 'same_device_map', True) and \
+            if getattr(config.llm.model_parallel, 'same_device_map', False) and \
                     hasattr(model, 'get_device_map'):
                 shared_device_map = model.get_device_map()
             adap_model = maybe_shard_model(adap_model,

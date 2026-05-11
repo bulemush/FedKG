@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from collections import OrderedDict
+import os
 import re
 from peft import get_peft_model, TaskType, PeftModel
 
@@ -57,6 +58,58 @@ def _visible_cuda_device_ids():
     return set(range(torch.cuda.device_count()))
 
 
+def _physical_to_logical_cuda_ids():
+    visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', '')
+    if visible_devices.strip() == '':
+        return {}
+
+    mapping = {}
+    for logical_id, item in enumerate(visible_devices.split(',')):
+        item = item.strip()
+        if item.isdigit():
+            mapping[int(item)] = logical_id
+    return mapping
+
+
+def _normalize_cuda_device_value(value):
+    if isinstance(value, torch.device):
+        if value.type == 'cuda':
+            value = 0 if value.index is None else value.index
+        else:
+            return str(value)
+
+    if isinstance(value, str):
+        lower_value = value.lower()
+        if lower_value.startswith('cuda:'):
+            index = lower_value.split(':', 1)[1]
+            if index.isdigit():
+                value = int(index)
+        elif lower_value == 'cuda':
+            value = 0
+        elif value.isdigit():
+            value = int(value)
+        else:
+            return value
+
+    if not isinstance(value, int):
+        return value
+
+    visible_device_ids = _visible_cuda_device_ids()
+    if value in visible_device_ids:
+        return value
+
+    physical_to_logical = _physical_to_logical_cuda_ids()
+    if value in physical_to_logical:
+        logical_id = physical_to_logical[value]
+        if logical_id in visible_device_ids:
+            logger.warning(
+                'Remap physical cuda:%s to logical cuda:%s according to '
+                'CUDA_VISIBLE_DEVICES.', value, logical_id)
+            return logical_id
+
+    return value
+
+
 def _normalize_device_map(device_map):
     if device_map in [None, '', 'none']:
         return None
@@ -75,13 +128,16 @@ def _normalize_device_map(device_map):
                 continue
             if isinstance(key, str) and key.isdigit():
                 key = int(key)
-            if isinstance(value, str) and value.isdigit():
-                value = int(value)
+            value = _normalize_cuda_device_value(value)
             if isinstance(key, int) and visible_device_ids and \
                     key not in visible_device_ids:
                 continue
             if isinstance(value, int) and visible_device_ids and \
                     value not in visible_device_ids:
+                logger.warning(
+                    'Ignore device_map entry %s -> cuda:%s because the device '
+                    'is not visible. CUDA_VISIBLE_DEVICES exposes logical GPUs '
+                    '%s.', key, value, sorted(visible_device_ids))
                 continue
             normalized[key] = value
         return normalized
@@ -104,6 +160,7 @@ def _normalize_max_memory(max_memory):
             if key_str.startswith('__'):
                 continue
             if isinstance(key, int):
+                key = _normalize_cuda_device_value(key)
                 if visible_device_ids and key not in visible_device_ids:
                     logger.warning(
                         'Ignore max_memory for cuda:%s because it is not '
@@ -113,7 +170,7 @@ def _normalize_max_memory(max_memory):
                 normalized[key] = value
                 continue
             if isinstance(key, str) and key.isdigit():
-                logical_id = int(key)
+                logical_id = _normalize_cuda_device_value(int(key))
                 if visible_device_ids and logical_id not in visible_device_ids:
                     logger.warning(
                         'Ignore max_memory for cuda:%s because it is not '
@@ -271,6 +328,34 @@ def _wrap_forward_to_own_device(module):
 
     setattr(module, forward_attr, device_aligned_forward)
     module._fs_forward_inputs_device_aligned = True
+
+
+def _validate_device_map(device_map):
+    if not isinstance(device_map, dict):
+        return device_map
+
+    visible_device_ids = _visible_cuda_device_ids()
+    if not visible_device_ids:
+        return device_map
+
+    invalid_items = {}
+    for key, value in device_map.items():
+        normalized_value = _normalize_cuda_device_value(value)
+        if isinstance(normalized_value, int):
+            if normalized_value not in visible_device_ids:
+                invalid_items[key] = value
+            elif normalized_value != value:
+                device_map[key] = normalized_value
+
+    if invalid_items:
+        raise ValueError(
+            'Invalid device_map contains CUDA devices that are not visible: '
+            f'{invalid_items}. CUDA_VISIBLE_DEVICES='
+            f'{os.environ.get("CUDA_VISIBLE_DEVICES", "")!r}, logical visible '
+            f'GPUs={sorted(visible_device_ids)}. Use logical GPU ids inside '
+            'the program, or remove fixed max_memory/device_map overrides.')
+
+    return device_map
 
 
 def maybe_shard_model(model, cfg, device_map=None, max_memory=None):
@@ -701,6 +786,16 @@ class AdapterModel(nn.Module):
                 max_memory=max_memory,
                 no_split_module_classes=self.model_unit,
             )
+
+        self.device_map = _validate_device_map(self.device_map)
+        logger.info('Dispatch model with CUDA_VISIBLE_DEVICES=%r, logical '
+                    'visible GPUs=%s, device_map devices=%s',
+                    os.environ.get('CUDA_VISIBLE_DEVICES', ''),
+                    sorted(_visible_cuda_device_ids()),
+                    sorted({
+                        str(device)
+                        for device in self.device_map.values()
+                    }) if isinstance(self.device_map, dict) else self.device_map)
 
         if isinstance(current_map, dict) and current_map == self.device_map:
             return
