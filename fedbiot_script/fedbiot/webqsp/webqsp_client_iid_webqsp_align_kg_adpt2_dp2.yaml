@@ -1,13 +1,13 @@
 use_gpu: True
 device: 0
 early_stop:
-  patience: 0
+  patience: 5
 federate:
   mode: standalone
   client_num: 3
-  total_round_num: 200
+  total_round_num: 80
   save_to: "checkpoints/llama.webqsp.webqsp.kg_adpt2.dp2.fedbiot.ckpt"
-  save_freq: 100
+  save_freq: 20
   share_local_model: True
   online_aggr: False
 data:
@@ -30,14 +30,14 @@ llm:
     same_device_map: False
   adapter:
     use: True
-    args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05 } ]
+    args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.1 } ]
   kg_adapter:
     use: True
     entity_vocab_size: 50000
     edge_vocab_size: 50000
     entity_hidden_size: 256
     num_heads: 4
-    dropout: 0.05
+    dropout: 0.1
     gnn_backend: 'paper'
     paper_gnn_path: 'federatedscope/llm/kg_adapter/paper_gnn/GNN.py'
     use_srgat: False
@@ -80,16 +80,17 @@ llm:
           type: SGD
           lr: 0.001
 dataloader:
-  batch_size: 2
+  batch_size: 1
 model:
   type: '/home/async/data-disk/wgh/FedKG/federatedscope/llm/data/models/Llama-2-7b-hf@huggingface_llm'
 train:
-  local_update_steps: 30
+  local_update_steps: 5
   batch_or_epoch: batch
   optimizer:
     type: AdamW
-    lr: 0.00005
+    lr: 0.00001
     betas: (0.9, 0.95)
+    weight_decay: 0.01
   is_enable_half: True
 grad:
   grad_clip: 1.0
@@ -98,7 +99,7 @@ criterion:
 trainer:
   type: llmtrainer
 eval:
-  freq: 100
+  freq: 5
   metrics: ['loss']
   best_res_update_round_wise_key: 'val_loss'
   report: ['weighted_avg', 'avg', 'raw']
