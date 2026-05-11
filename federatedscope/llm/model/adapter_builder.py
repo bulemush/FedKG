@@ -610,6 +610,11 @@ class AdapterModel(nn.Module):
                  if idx < boundary),
                 len(device_ids) - 1)
             device_map[f'{layer_prefix}.{idx}'] = device_ids[device_idx]
+        logger.info('balanced_layers layer counts by device: %s',
+                    {
+                        device_ids[idx]: layer_counts[idx]
+                        for idx in range(len(device_ids))
+                    })
 
         if final_norm_name is not None:
             device_map[final_norm_name] = last_device

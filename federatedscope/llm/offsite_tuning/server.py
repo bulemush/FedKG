@@ -1,5 +1,12 @@
 import os
 import logging
+import gc
+import torch
+
+try:
+    from accelerate.hooks import remove_hook_from_submodules
+except Exception:
+    remove_hook_from_submodules = None
 
 from federatedscope.core.message import Message
 from federatedscope.core.auxiliaries.utils import b64serializer, \
@@ -14,6 +21,21 @@ from federatedscope.llm.model.adapter_builder import maybe_shard_model, \
     _scale_max_memory
 
 logger = logging.getLogger(__name__)
+
+
+def _release_model_from_cuda(model):
+    if model is None:
+        return
+    try:
+        target = getattr(model, 'model', model)
+        if remove_hook_from_submodules is not None:
+            remove_hook_from_submodules(target)
+        model.cpu()
+    except Exception as error:
+        logger.warning('Failed to move unused raw model to CPU: %s', error)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class OffsiteTuningServer(Server):
@@ -71,13 +93,18 @@ class OffsiteTuningServer(Server):
                 os._exit(0)
         # No need for this attr
         if hasattr(adap_model, 'teacher'):
-            import gc
-            import torch
             del adap_model.teacher
             gc.collect()
             torch.cuda.empty_cache()
 
-        self.raw_model = model
+        if config.llm.offsite_tuning.eval_type == 'full':
+            self.raw_model = model
+        else:
+            logger.info('Server: eval_type=emu, releasing unused raw model '
+                        'from CUDA before client training.')
+            _release_model_from_cuda(model)
+            self.raw_model = None
+            model = None
         super(OffsiteTuningServer,
               self).__init__(ID, state, config, data, adap_model, client_num,
                              total_round_num, device, strategy, **kwargs)

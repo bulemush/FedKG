@@ -391,6 +391,10 @@ def align_student_with_teacher(raw_model, adap_model, cfg, device, monitor):
                            monitor=monitor)
     logger.info('Start to align student model with teacher model...')
     kd_trainer.train()
+    del kd_trainer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     logger.info('Alignment finished!')
 
     # Save aligned model
