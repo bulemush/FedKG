@@ -133,6 +133,61 @@ def _scale_max_memory(max_memory, factor):
     }
 
 
+def _memory_to_gib(value):
+    if value in [None, '']:
+        return None
+    if isinstance(value, (int, float)):
+        # Accelerate accepts integer bytes for max_memory.
+        return float(value) / (1024 ** 3)
+    if isinstance(value, str):
+        matched = re.match(r'^\s*([0-9]*\.?[0-9]+)\s*([A-Za-z]+)\s*$',
+                           value)
+        if matched is None:
+            return None
+        amount = float(matched.group(1))
+        unit = matched.group(2).lower()
+        if unit in ['gib', 'gi']:
+            return amount
+        if unit in ['gb', 'g']:
+            return amount * (1000 ** 3) / (1024 ** 3)
+        if unit in ['mib', 'mi']:
+            return amount / 1024
+        if unit in ['mb', 'm']:
+            return amount * (1000 ** 2) / (1024 ** 3)
+        if unit in ['kib', 'ki']:
+            return amount / (1024 ** 2)
+        if unit in ['kb', 'k']:
+            return amount * 1000 / (1024 ** 3)
+    return None
+
+
+def _balanced_layer_counts(total_layers, device_ids, max_memory=None):
+    if total_layers <= 0 or len(device_ids) == 0:
+        return []
+
+    weights = []
+    for device_id in device_ids:
+        memory = None
+        if max_memory is not None:
+            memory = _memory_to_gib(max_memory.get(device_id))
+        weights.append(memory if memory is not None and memory > 0 else 1.0)
+
+    weight_sum = sum(weights)
+    if weight_sum <= 0:
+        weights = [1.0 for _ in device_ids]
+        weight_sum = float(len(device_ids))
+
+    raw_counts = [total_layers * weight / weight_sum for weight in weights]
+    counts = [int(count) for count in raw_counts]
+    remaining = total_layers - sum(counts)
+    order = sorted(range(len(device_ids)),
+                   key=lambda idx: raw_counts[idx] - counts[idx],
+                   reverse=True)
+    for idx in order[:remaining]:
+        counts[idx] += 1
+    return counts
+
+
 def _ceil_div(a, b):
     return (a + b - 1) // b
 
@@ -541,9 +596,19 @@ class AdapterModel(nn.Module):
             device_map[input_embedding_name] = first_device
 
         total_layers = len(layers)
-        layers_per_device = _ceil_div(total_layers, len(device_ids))
+        layer_counts = _balanced_layer_counts(total_layers, device_ids,
+                                              max_memory)
+        layer_boundaries = []
+        next_boundary = 0
+        for count in layer_counts:
+            next_boundary += count
+            layer_boundaries.append(next_boundary)
+
         for idx in range(total_layers):
-            device_idx = min(idx // layers_per_device, len(device_ids) - 1)
+            device_idx = next(
+                (pos for pos, boundary in enumerate(layer_boundaries)
+                 if idx < boundary),
+                len(device_ids) - 1)
             device_map[f'{layer_prefix}.{idx}'] = device_ids[device_idx]
 
         if final_norm_name is not None:
