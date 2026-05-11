@@ -16,6 +16,31 @@ from federatedscope.core.auxiliaries.data_builder import get_data
 logger = logging.getLogger(__name__)
 
 
+def _get_module_device(module):
+    for param in module.parameters(recurse=True):
+        return param.device
+    for buffer in module.buffers(recurse=True):
+        return buffer.device
+    return None
+
+
+def _move_to_device(value, device):
+    if device is None:
+        return value
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, tuple):
+        return tuple(_move_to_device(item, device) for item in value)
+    if isinstance(value, list):
+        return [_move_to_device(item, device) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _move_to_device(item, device)
+            for key, item in value.items()
+        }
+    return value
+
+
 def add_prologue(module, prologue):
     """
     This function is borrowed from offsite-tuning:
@@ -27,6 +52,9 @@ def add_prologue(module, prologue):
 
     def new_forward(self):
         def lambda_forward(*args, **kwargs):
+            module_device = _get_module_device(self)
+            args = _move_to_device(args, module_device)
+            kwargs = _move_to_device(kwargs, module_device)
             self.input_args = args
             self.input_kwargs = kwargs
             if self.prologue is not None:
@@ -53,6 +81,9 @@ def add_epilogue(module, epilogue):
 
     def new_forward(self):
         def lambda_forward(*args, **kwargs):
+            module_device = _get_module_device(self)
+            args = _move_to_device(args, module_device)
+            kwargs = _move_to_device(kwargs, module_device)
             output = self.old_forward(*args, **kwargs)
             if isinstance(output, tuple):
                 x = output[0]

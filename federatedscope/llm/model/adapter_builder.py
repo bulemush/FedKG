@@ -39,6 +39,10 @@ if Qwen2ForCausalLM is not None:
 if GemmaForCausalLM is not None:
     MODEL_UNIT[GemmaForCausalLM] = ['GemmaDecoderLayer']
 
+for _model_units in MODEL_UNIT.values():
+    if 'KGInjectedLayer' not in _model_units:
+        _model_units.append('KGInjectedLayer')
+
 import logging
 import sys
 
@@ -550,7 +554,12 @@ class AdapterModel(nn.Module):
         if isinstance(current_map, dict) and current_map == self.device_map:
             return
 
-        self.model = dispatch_model(self.model, device_map=self.device_map)
+        try:
+            self.model = dispatch_model(self.model,
+                                        device_map=self.device_map,
+                                        force_hooks=True)
+        except TypeError:
+            self.model = dispatch_model(self.model, device_map=self.device_map)
 
     def get_input_device(self):
         input_embeddings = self.get_input_embeddings()
