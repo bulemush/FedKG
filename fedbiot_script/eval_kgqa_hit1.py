@@ -267,6 +267,7 @@ def main():
     generation_kwargs = {
         'max_new_tokens': args.max_new_tokens,
         'num_beams': args.num_beams,
+        'use_cache': False,
         'do_sample': args.temperature > 0,
         'temperature': args.temperature if args.temperature > 0 else None,
         'top_p': args.top_p,

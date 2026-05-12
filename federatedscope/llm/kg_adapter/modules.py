@@ -1176,6 +1176,14 @@ class KGHybridEmbedding(nn.Module):
                 token_entity_ids = token_entity_ids.unsqueeze(-1)
         if token_entity_ids is None:
             return None
+        if token_entity_ids.size(1) > seq_len:
+            token_entity_ids = token_entity_ids[:, :seq_len]
+        elif token_entity_ids.size(1) < seq_len:
+            pad_shape = (token_entity_ids.size(0),
+                         seq_len - token_entity_ids.size(1),
+                         token_entity_ids.size(2))
+            pad = token_entity_ids.new_full(pad_shape, -1)
+            token_entity_ids = torch.cat([token_entity_ids, pad], dim=1)
 
         gather_index = token_entity_ids.clamp_min(0).clamp_max(
             max(entity_count - 1, 0))
