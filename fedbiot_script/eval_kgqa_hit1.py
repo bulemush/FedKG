@@ -58,15 +58,33 @@ def parse_args():
     parser.add_argument('--temperature', type=float, default=0.0)
     parser.add_argument('--top-p', type=float, default=1.0)
     parser.add_argument('--num-beams', type=int, default=1)
+    parser.add_argument('--allow-unlabeled',
+                        action='store_true',
+                        help='Allow evaluating/generating on splits without '
+                        'gold answers. hit@1 will be invalid for them.')
     parser.add_argument('opts',
                         nargs=argparse.REMAINDER,
                         help='Optional cfg overrides after --, e.g. -- device 0')
-    return parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
+    args.opts.extend(unknown_args)
+    return args
+
+
+def _normalize_cfg_opts(opts):
+    if opts and opts[0] == '--':
+        opts = opts[1:]
+    normalized = []
+    for item in opts:
+        if item.startswith('--') and len(item) > 2:
+            item = item[2:]
+        normalized.append(item)
+    return normalized
 
 
 def _load_cfg(args):
     cfg = global_cfg.clone()
     cfg.merge_from_file(args.cfg)
+    args.opts = _normalize_cfg_opts(args.opts)
     cfg_opt, _ = parse_client_cfg(args.opts)
     cfg.merge_from_list(cfg_opt)
     if args.ckpt:
@@ -154,6 +172,8 @@ def _normalize_answer(text):
 
 
 def _hit_at_1(prediction, answers):
+    if len(answers) == 0:
+        return 0, _normalize_answer(_strip_prediction(prediction)), []
     pred = _normalize_answer(_strip_prediction(prediction))
     gold = [_normalize_answer(answer) for answer in answers]
     return int(pred != '' and pred in gold), pred, gold
@@ -256,6 +276,16 @@ def main():
                                         bot.tokenizer)
     if args.limit > 0:
         records = records[:args.limit]
+    unlabeled_num = sum(1 for record in records
+                        if not str(record.get('target', '')).strip())
+    if unlabeled_num > 0 and not args.allow_unlabeled:
+        raise ValueError(
+            f'{dataset_name.upper()} {args.split} contains {unlabeled_num} '
+            'records without gold answers, so hit@1 cannot be computed. '
+            'For CWQ, the official test file in this repo has no `answers` '
+            'field. Use `--split val` to evaluate on dev, provide a labeled '
+            'test file in cfg.data.args, or add `--allow-unlabeled` only to '
+            'generate predictions without valid hit@1.')
 
     output_path = args.output or os.path.join(
         cfg.outdir, f'{dataset_name}_{args.split}_hit1_predictions.jsonl')
@@ -284,7 +314,11 @@ def main():
     with open(output_path, 'w', encoding='utf-8') as fout:
         for idx, record in enumerate(tqdm(records, desc='Evaluating hit@1')):
             prediction = _generate_one(bot, cfg, record, generation_kwargs)
-            answers = [answer.strip() for answer in record['target'].split(';')]
+            answers = [
+                answer.strip()
+                for answer in record.get('target', '').split(';')
+                if answer.strip()
+            ]
             hit, normalized_pred, normalized_gold = _hit_at_1(
                 prediction, answers)
             correct += hit

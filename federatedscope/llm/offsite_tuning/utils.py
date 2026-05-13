@@ -334,9 +334,15 @@ def build_cfg_for_alignment(config):
     return new_cfg
 
 
-def align_student_with_teacher(raw_model, adap_model, cfg, device, monitor):
+def align_student_with_teacher(raw_model,
+                               adap_model,
+                               cfg,
+                               device,
+                               monitor,
+                               allow_restore=True,
+                               save_aligned=True):
     does_train_emulator = True
-    if cfg.llm.offsite_tuning.emu_align.restore_from != '':
+    if allow_restore and cfg.llm.offsite_tuning.emu_align.restore_from != '':
         try:
             if not os.path.exists(
                     cfg.llm.offsite_tuning.emu_align.restore_from):
@@ -398,8 +404,9 @@ def align_student_with_teacher(raw_model, adap_model, cfg, device, monitor):
     logger.info('Alignment finished!')
 
     # Save aligned model
-    del adap_model.teacher
-    if cfg.llm.offsite_tuning.emu_align.save_to != '':
+    if hasattr(adap_model, 'teacher'):
+        del adap_model.teacher
+    if save_aligned and cfg.llm.offsite_tuning.emu_align.save_to != '':
         adap_model.save_model(cfg.llm.offsite_tuning.emu_align.save_to)
 
     # Make adapter trainable

@@ -23,6 +23,14 @@ from federatedscope.llm.model.adapter_builder import maybe_shard_model, \
 logger = logging.getLogger(__name__)
 
 
+def _cfg_get(cfg, key, default=None):
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
 def _release_model_from_cuda(model):
     if model is None:
         return
@@ -56,13 +64,18 @@ class OffsiteTuningServer(Server):
                  **kwargs):
         logger.info('Server: Generating emulator and adapter...')
         adap_model = generate_adap_model(model, config.llm.offsite_tuning)
+        self._periodic_emu_align_enabled = bool(
+            config.llm.offsite_tuning.emu_align.use and
+            _cfg_get(config.llm.offsite_tuning.emu_align, 'periodic', False))
+        self._periodic_align_broadcast_pending = False
         shared_device_map = None
         if getattr(config.llm.model_parallel, 'use', False):
             shard_max_memory = getattr(config.llm.model_parallel,
                                        'max_memory',
                                        None)
             if config.llm.offsite_tuning.emu_align.use and \
-                    config.llm.offsite_tuning.emu_align.initial_only:
+                    (config.llm.offsite_tuning.emu_align.initial_only or
+                     self._periodic_emu_align_enabled):
                 coexist_ratio = float(
                     getattr(config.llm.model_parallel,
                             'coexisting_model_ratio',
@@ -97,7 +110,8 @@ class OffsiteTuningServer(Server):
             gc.collect()
             torch.cuda.empty_cache()
 
-        if config.llm.offsite_tuning.eval_type == 'full':
+        if config.llm.offsite_tuning.eval_type == 'full' or \
+                self._periodic_emu_align_enabled:
             self.raw_model = model
         else:
             logger.info('Server: eval_type=emu, releasing unused raw model '
@@ -117,6 +131,95 @@ class OffsiteTuningServer(Server):
                                                  monitor=Monitor(
                                                      self._cfg,
                                                      monitored_object=self))
+
+    def _periodic_align_should_run(self):
+        if not self._periodic_emu_align_enabled:
+            return False
+        if self.raw_model is None:
+            logger.warning('Skip periodic emulator alignment because raw '
+                           'full model is unavailable.')
+            return False
+
+        emu_align_cfg = self._cfg.llm.offsite_tuning.emu_align
+        interval = int(_cfg_get(emu_align_cfg, 'periodic_interval', 1) or 0)
+        if interval <= 0:
+            return False
+
+        completed_round = self.state
+        start_round = int(
+            _cfg_get(emu_align_cfg, 'periodic_start_round', 0) or 0)
+        if completed_round < start_round:
+            return False
+        return (completed_round + 1) % interval == 0
+
+    def _sync_raw_model_with_current_adapter(self):
+        if self.raw_model is None:
+            return
+        try:
+            self.raw_model.load_state_dict(self.model.state_dict(),
+                                           strict=False)
+        except Exception as error:
+            logger.warning('Failed to sync current adapter parameters into '
+                           'raw model before periodic alignment: %s', error)
+
+    def _align_emulator_after_aggregation(self):
+        if not self._periodic_align_should_run():
+            return
+
+        completed_round = self.state
+        logger.info('Server: Periodic emulator alignment after aggregation '
+                    'of round #%s starts.', completed_round)
+        self._sync_raw_model_with_current_adapter()
+        self.model = align_student_with_teacher(
+            raw_model=self.raw_model,
+            adap_model=self.model,
+            cfg=self._cfg,
+            device=self.device,
+            monitor=Monitor(self._cfg, monitored_object=self),
+            allow_restore=False,
+            save_aligned=bool(
+                _cfg_get(self._cfg.llm.offsite_tuning.emu_align,
+                         'periodic_save', False)))
+        for model_idx in range(len(self.models)):
+            self.models[model_idx] = self.model
+        for aggregator in getattr(self, 'aggregators', []):
+            if hasattr(aggregator, 'model'):
+                aggregator.model = self.model
+        self._periodic_align_broadcast_pending = True
+        logger.info('Server: Periodic emulator alignment after aggregation '
+                    'of round #%s finished.', completed_round)
+
+    def _perform_federated_aggregation(self):
+        aggregated_num = super(OffsiteTuningServer,
+                               self)._perform_federated_aggregation()
+        self._align_emulator_after_aggregation()
+        return aggregated_num
+
+    def broadcast_model_para(self, *args, **kwargs):
+        if not self._periodic_align_broadcast_pending:
+            return super(OffsiteTuningServer,
+                         self).broadcast_model_para(*args, **kwargs)
+
+        try:
+            logger.info(
+                'Server: Broadcasting aggregated adapter params (%s tensors) '
+                'and re-aligned emulator LoRA params (%s tensors).',
+                len(self.models[0].get_trainable_state_dict()),
+                len(self.models[0].get_student_state_dict()))
+        except Exception as error:
+            logger.warning('Failed to summarize periodic alignment broadcast '
+                           'parameters: %s', error)
+
+        for model in self.models:
+            setattr(model, 'include_student_in_state_dict', True)
+        try:
+            return super(OffsiteTuningServer,
+                         self).broadcast_model_para(*args, **kwargs)
+        finally:
+            for model in self.models:
+                if hasattr(model, 'include_student_in_state_dict'):
+                    delattr(model, 'include_student_in_state_dict')
+            self._periodic_align_broadcast_pending = False
 
     def trigger_for_feat_engr(self,
                               trigger_train_func,

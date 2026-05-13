@@ -59,6 +59,10 @@ llm:
     emu_align:
       use: True
       initial_only: True
+      periodic: True
+      periodic_interval: 1
+      periodic_start_round: 0
+      periodic_save: False
       sim_loss: 'l2'
       layerwise_distill: False
       kl_divergence: 'raw'

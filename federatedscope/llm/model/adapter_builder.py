@@ -596,7 +596,10 @@ class AdapterModel(nn.Module):
 
     def state_dict(self, return_trainable=True, *args, **kwargs):
         if return_trainable:
-            return self.get_trainable_state_dict()
+            state_dict = self.get_trainable_state_dict()
+            if getattr(self, 'include_student_in_state_dict', False):
+                state_dict.update(self.get_student_state_dict())
+            return state_dict
         else:
             return self.model.state_dict(*args, **kwargs)
 
@@ -604,23 +607,40 @@ class AdapterModel(nn.Module):
         return self.model.load_state_dict(state_dict, strict=False)
 
     def get_trainable_state_dict(self):
-        trainable_patterns = self._collect_trainable_patterns()
         grad_params = []
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 grad_params.append(name)
-                continue
-
-            for pattern in trainable_patterns:
-                if (pattern in name) and (name not in grad_params):
-                    grad_params.append(name)
-                    break
         model_state_dict = self.model.state_dict()
         new_state_dict = OrderedDict()
         for k, v in model_state_dict.items():
             if k in grad_params:
                 new_state_dict[k] = v
         return new_state_dict
+
+    def get_student_state_dict(self):
+        if not hasattr(self, 'student'):
+            return OrderedDict()
+
+        student_layers = self.student \
+            if isinstance(self.student, (nn.ModuleList, list, tuple)) \
+            else [self.student]
+        student_param_ids = {
+            id(param)
+            for layer in student_layers
+            for param in layer.parameters(recurse=True)
+        }
+        trainable_patterns = self._collect_trainable_patterns()
+        model_state_dict = self.model.state_dict()
+        student_state_dict = OrderedDict()
+        for name, param in self.model.named_parameters():
+            if id(param) not in student_param_ids or \
+                    name not in model_state_dict:
+                continue
+            if param.requires_grad or any(pattern in name
+                                          for pattern in trainable_patterns):
+                student_state_dict[name] = model_state_dict[name]
+        return student_state_dict
 
     def save_model(self,
                    path,

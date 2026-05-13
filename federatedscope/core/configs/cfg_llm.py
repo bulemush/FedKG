@@ -122,6 +122,12 @@ def extend_llm_cfg(cfg):
     cfg.llm.offsite_tuning.emu_align.restore_from = ''
     cfg.llm.offsite_tuning.emu_align.save_to = ''
     cfg.llm.offsite_tuning.emu_align.exit_after_align = False
+    # If enabled, re-align the emulator with the full model after FL
+    # aggregation. The same KD/sim loss as the initial alignment is reused.
+    cfg.llm.offsite_tuning.emu_align.periodic = False
+    cfg.llm.offsite_tuning.emu_align.periodic_interval = 1
+    cfg.llm.offsite_tuning.emu_align.periodic_start_round = 0
+    cfg.llm.offsite_tuning.emu_align.periodic_save = False
 
     # Server held-out data
     # Emulator alignment reuses regular `data` options and later copies the
