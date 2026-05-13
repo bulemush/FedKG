@@ -101,7 +101,9 @@ class OffsiteTuningServer(Server):
                                                     device=device,
                                                     monitor=Monitor(
                                                         config,
-                                                        monitored_object=self))
+                                                        monitored_object=self),
+                                                    keep_raw_model_on_device=
+                                                    self._periodic_emu_align_enabled)
             if config.llm.offsite_tuning.emu_align.exit_after_align:
                 os._exit(0)
         # No need for this attr
@@ -177,6 +179,7 @@ class OffsiteTuningServer(Server):
             device=self.device,
             monitor=Monitor(self._cfg, monitored_object=self),
             allow_restore=False,
+            keep_raw_model_on_device=True,
             save_aligned=bool(
                 _cfg_get(self._cfg.llm.offsite_tuning.emu_align,
                          'periodic_save', False)))
@@ -252,7 +255,8 @@ class OffsiteTuningServer(Server):
     def eval(self):
         # Update the raw model with the new adapters
         if self._cfg.llm.offsite_tuning.eval_type == 'full':
-            self.model.to('cpu')
+            if not self._periodic_emu_align_enabled:
+                self.model.to('cpu')
             new_raw_model_state_dict = self.raw_model.state_dict(
                 return_trainable=False)
             for key, value in self.model.state_dict().items():
@@ -266,8 +270,8 @@ class OffsiteTuningServer(Server):
                     target_data_split_name=split)
                 for key, value in metrics.items():
                     raw_metrics['plugin.' + key] = value
-            # Move to cpu
-            self.raw_model.to('cpu')
+            if not self._periodic_emu_align_enabled:
+                self.raw_model.to('cpu')
 
         if self._cfg.federate.make_global_eval:
             # By default, the evaluation is conducted one-by-one for all

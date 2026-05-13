@@ -5,9 +5,9 @@ early_stop:
 federate:
   mode: standalone
   client_num: 3
-  total_round_num: 100
-  save_to: "checkpoints/llama.cwq.webqsp.kg_adpt2.dp2.fedbiot.ckpt"
-  save_freq: 50
+  total_round_num: 200
+  save_to: "checkpoints/llama.cwq.webqsp.adpt2.dp2.fedbiot_nokg.ckpt"
+  save_freq: 100
   share_local_model: True
   online_aggr: False
 data:
@@ -32,23 +32,7 @@ llm:
     use: True
     args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05 } ]
   kg_adapter:
-    use: True
-    entity_vocab_size: 50000
-    edge_vocab_size: 50000
-    entity_hidden_size: 256
-    num_heads: 4
-    dropout: 0.05
-    gnn_backend: 'paper'
-    paper_gnn_path: 'federatedscope/llm/kg_adapter/paper_gnn/GNN.py'
-    use_srgat: False
-    num_relations: 38
-    keep_ratio: 1.0
-    max_node_num_per_batch: 2500
-    use_edge_emb: True
-    use_gnn: True
-    use_trips: True
-    use_joint_reasoning: True
-    adapter_last_n: 0
+    use: False
   offsite_tuning:
     use: True
     save_full_model: True
@@ -81,7 +65,7 @@ llm:
         lm_loss_weight: 0.0
         kd_loss_weight: 0.9
 dataloader:
-  batch_size: 3
+  batch_size: 1
 model:
   type: '/home/async/data-disk/wgh/FedKG/federatedscope/llm/data/models/Llama-2-7b-hf@huggingface_llm'
 train:
@@ -102,4 +86,4 @@ eval:
   best_res_update_round_wise_key: 'val_loss'
   report: ['weighted_avg', 'avg', 'raw']
   count_flops: False
-expname: "fedbiot/llama-7b_cwq_webqsp_offsite_kg_adpt2_dp2"
+expname: "fedbiot/llama-7b_cwq_webqsp_offsite_adpt2_dp2_nokg"

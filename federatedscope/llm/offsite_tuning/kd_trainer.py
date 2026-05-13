@@ -142,10 +142,12 @@ class KDTrainer(LLMTrainer):
                  device,
                  config,
                  only_for_eval=False,
-                 monitor=None):
+                 monitor=None,
+                 keep_raw_model_on_device=False):
         super(KDTrainer, self).__init__(adapter_model, data, device, config,
                                         only_for_eval, monitor)
         self.ctx.raw_model = raw_model
+        self.keep_raw_model_on_device = keep_raw_model_on_device
         if not config.llm.accelerator.use and \
                 not self._model_has_device_map(self.ctx.raw_model):
             self.ctx.raw_model = self.ctx.raw_model.to(device)
@@ -190,8 +192,11 @@ class KDTrainer(LLMTrainer):
     def train(self, target_data_split_name="train", hooks_set=None):
         num_samples, model_para_all, eval_metrics = \
             super(KDTrainer, self).train(target_data_split_name, hooks_set)
-        logger.info("Finish alignment, move raw model to cpu.")
-        self.ctx.raw_model.cpu()
+        if self.keep_raw_model_on_device:
+            logger.info("Finish alignment, keep raw model on current device.")
+        else:
+            logger.info("Finish alignment, move raw model to cpu.")
+            self.ctx.raw_model.cpu()
         return num_samples, model_para_all, eval_metrics
 
     def _hook_on_batch_forward(self, ctx):

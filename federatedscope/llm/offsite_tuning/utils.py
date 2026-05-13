@@ -340,7 +340,8 @@ def align_student_with_teacher(raw_model,
                                device,
                                monitor,
                                allow_restore=True,
-                               save_aligned=True):
+                               save_aligned=True,
+                               keep_raw_model_on_device=False):
     does_train_emulator = True
     if allow_restore and cfg.llm.offsite_tuning.emu_align.restore_from != '':
         try:
@@ -394,7 +395,8 @@ def align_student_with_teacher(raw_model,
                            device,
                            new_cfg,
                            only_for_eval=False,
-                           monitor=monitor)
+                           monitor=monitor,
+                           keep_raw_model_on_device=keep_raw_model_on_device)
     logger.info('Start to align student model with teacher model...')
     kd_trainer.train()
     del kd_trainer
