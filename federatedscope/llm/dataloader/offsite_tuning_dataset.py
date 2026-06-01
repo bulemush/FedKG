@@ -99,6 +99,58 @@ class OpenBookQA:
         ]
 
 
+class MCQATask:
+    _template = (
+        "Question: {question}\n"
+        "Choices:\n"
+        "{choices}\n"
+        "Answer with the correct option letter.\n"
+        "Answer:")
+
+    @staticmethod
+    def _format_choices(labels, texts):
+        return "\n".join([
+            f"{str(label).strip()}. {str(text).strip()}"
+            for label, text in zip(labels, texts)
+        ])
+
+    def _build_records(self, examples, category_name):
+        questions = examples[self.question_key]
+        choices = examples['choices']
+        answers = examples['answerKey']
+        records = []
+        for question, choice, answer in zip(questions, choices, answers):
+            labels = choice.get('label', [])
+            texts = choice.get('text', [])
+            answer = str(answer).strip()
+            context = self._template.format(
+                question=str(question).strip(),
+                choices=self._format_choices(labels, texts))
+            records.append(
+                dict(context=context,
+                     target=answer,
+                     category=f'{category_name}_{answer}'))
+        return records
+
+
+class OpenBookQAMCQA(MCQATask):
+    def __init__(self):
+        self.dataset = datasets.load_dataset('openbookqa')
+        self.question_key = 'question_stem'
+
+    def get_data_dict(self, label='train'):
+        return self._build_records(self.dataset[label], 'openbookqa')
+
+
+class CommonsenseQA(MCQATask):
+    def __init__(self):
+        self.dataset = datasets.load_dataset('commonsense_qa')
+        self.question_key = 'question'
+
+    def get_data_dict(self, label='train'):
+        return self._build_records(self.dataset[label], 'commonsenseqa')
+
+
 class ARC:
     def __init__(self, name):
         self._template = "Question: {}\nAnswer:"

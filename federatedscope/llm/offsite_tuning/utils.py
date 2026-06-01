@@ -2,6 +2,7 @@ import gc
 import os
 import copy
 import logging
+import re
 import torch
 import torch.nn as nn
 
@@ -251,24 +252,33 @@ def generate_emulator_and_adapter(model: AdapterModel,
     emulator_and_adapter = nn.ModuleList()
 
     # Adapter before Emulator, make it trainable
+    layer_mapping = []
+    adapter_layer_mapping = {}
     for idx in range(l):
         emulator_and_adapter.append(layers[idx])
+        layer_mapping.append(idx)
+        adapter_layer_mapping[len(layer_mapping) - 1] = idx
     emu_l = l
 
     # Emulator
     for idx in range(len(emulator)):
         emulator_and_adapter.append(emulator[idx])
+        layer_mapping.append(l + emulator_maps[idx])
     emu_r = l + len(emulator)
 
     # Adapter after Emulator, make it trainable
     for idx in range(r, len(layers)):
         emulator_and_adapter.append(layers[idx])
+        layer_mapping.append(idx)
+        adapter_layer_mapping[len(layer_mapping) - 1] = idx
 
     new_model = copy.deepcopy(model)
     new_emulator_and_adapter = copy.deepcopy(emulator_and_adapter)
     # Set student model
     new_model = set_layers(new_model, new_emulator_and_adapter, emu_l, emu_r)
     new_model.teacher_model_mapping = emulator_maps
+    new_model.offsite_layer_mapping = layer_mapping
+    new_model.offsite_adapter_layer_mapping = adapter_layer_mapping
     # make the adapter trainable on clients' models
     convert_layers_train_state(
         new_model.adapter,
@@ -303,16 +313,143 @@ def convert_layers_train_state(layers, name_pattern=None, is_trainable=True):
                 param.requires_grad = False
 
 
+def _get_layer_prefixes(adapter_model):
+    layers = get_layers(adapter_model)
+    if not isinstance(layers, (nn.ModuleList, list, tuple)):
+        return {}
+
+    layer_ids = {
+        id(layer): layer_idx
+        for layer_idx, layer in enumerate(layers)
+    }
+    prefixes = {}
+    for name, module in adapter_model.model.named_modules():
+        layer_idx = layer_ids.get(id(module), None)
+        if layer_idx is not None:
+            prefixes[layer_idx] = name
+    return prefixes
+
+
+def _get_trainable_state_keys(adapter_model):
+    trainable_param_names = {
+        name
+        for name, param in adapter_model.model.named_parameters()
+        if param.requires_grad
+    }
+    model_state = adapter_model.model.state_dict()
+    return {
+        name
+        for name in trainable_param_names
+        if name in model_state
+    }
+
+
+def _copy_state_by_layer_mapping(raw_model, adap_model, trainable_keys):
+    adapter_layer_mapping = getattr(adap_model,
+                                    'offsite_adapter_layer_mapping',
+                                    None)
+    if not adapter_layer_mapping:
+        return 0
+
+    raw_prefixes = _get_layer_prefixes(raw_model)
+    adap_prefixes = _get_layer_prefixes(adap_model)
+    raw_state = raw_model.model.state_dict()
+    adap_state = adap_model.model.state_dict()
+    new_raw_state = copy.copy(raw_state)
+    copied = 0
+
+    for adap_layer_idx, raw_layer_idx in adapter_layer_mapping.items():
+        adap_prefix = adap_prefixes.get(adap_layer_idx, None)
+        raw_prefix = raw_prefixes.get(raw_layer_idx, None)
+        if adap_prefix is None or raw_prefix is None:
+            logger.warning('Skip adapter layer mapping %s -> %s: cannot find '
+                           'layer prefix in state_dict.',
+                           adap_layer_idx, raw_layer_idx)
+            continue
+
+        src_prefix = adap_prefix + '.'
+        dst_prefix = raw_prefix + '.'
+        for src_key, src_value in adap_state.items():
+            if not src_key.startswith(src_prefix):
+                continue
+            if src_key not in trainable_keys:
+                continue
+            dst_key = dst_prefix + src_key[len(src_prefix):]
+            dst_value = raw_state.get(dst_key, None)
+            if dst_value is None:
+                continue
+            if src_value.shape != dst_value.shape:
+                logger.warning('Skip loading `%s` into `%s`: shape mismatch '
+                               '%s vs %s.', src_key, dst_key,
+                               tuple(src_value.shape), tuple(dst_value.shape))
+                continue
+            new_raw_state[dst_key] = src_value.to(device=dst_value.device,
+                                                  dtype=dst_value.dtype)
+            copied += 1
+
+    if copied > 0:
+        raw_model.model.load_state_dict(new_raw_state, strict=False)
+    return copied
+
+
+def _copy_global_trainable_state(raw_model, adap_model, trainable_keys):
+    adap_prefixes = _get_layer_prefixes(adap_model)
+    layer_prefixes = tuple(prefix + '.' for prefix in adap_prefixes.values())
+    raw_state = raw_model.model.state_dict()
+    adap_state = adap_model.model.state_dict()
+    new_raw_state = copy.copy(raw_state)
+    copied = 0
+
+    for src_key in trainable_keys:
+        if src_key.startswith(layer_prefixes):
+            continue
+        src_value = adap_state[src_key]
+        dst_value = raw_state.get(src_key, None)
+        if dst_value is None:
+            logger.warning('Skip loading global adapter tensor `%s`: no exact '
+                           'key in full model.', src_key)
+            continue
+        if src_value.shape != dst_value.shape:
+            logger.warning('Skip loading global adapter tensor `%s`: shape '
+                           'mismatch %s vs %s.', src_key,
+                           tuple(src_value.shape), tuple(dst_value.shape))
+            continue
+        new_raw_state[src_key] = src_value.to(device=dst_value.device,
+                                              dtype=dst_value.dtype)
+        copied += 1
+
+    if copied > 0:
+        raw_model.model.load_state_dict(new_raw_state, strict=False)
+    return copied
+
+
+def _looks_like_layer_state_key(key):
+    return re.search(r'(^|\.)\d+\.', key) is not None
+
+
 def load_adapter_state_from_adap_model(raw_model, adap_model):
     if not hasattr(raw_model, 'adapter') or not hasattr(adap_model, 'adapter'):
         raise AttributeError('Both raw_model and adap_model must have an '
                              '`adapter` attribute.')
 
+    trainable_keys = _get_trainable_state_keys(adap_model)
+    copied_by_mapping = _copy_state_by_layer_mapping(raw_model, adap_model,
+                                                     trainable_keys)
+    copied_global = _copy_global_trainable_state(raw_model, adap_model,
+                                                 trainable_keys)
+    if copied_by_mapping > 0 or copied_global > 0:
+        copied_total = copied_by_mapping + copied_global
+        logger.info('Loaded %s tensors into full model (%s layer-mapped, '
+                    '%s global exact).', copied_total, copied_by_mapping,
+                    copied_global)
+        return copied_total
+
+    logger.warning('No explicit offsite adapter layer mapping is available; '
+                   'falling back to exact adapter state_dict keys only.')
     raw_adapter_state = raw_model.adapter.state_dict()
     adap_adapter_state = adap_model.adapter.state_dict()
     new_adapter_state = copy.copy(raw_adapter_state)
     copied_keys = []
-    unmatched_keys = []
 
     for key, dst_value in raw_adapter_state.items():
         src_value = adap_adapter_state.get(key, None)
@@ -320,29 +457,10 @@ def load_adapter_state_from_adap_model(raw_model, adap_model):
             new_adapter_state[key] = src_value.to(device=dst_value.device,
                                                   dtype=dst_value.dtype)
             copied_keys.append(key)
-        else:
-            unmatched_keys.append(key)
-
-    if unmatched_keys:
-        unused_src_keys = [
-            key for key in adap_adapter_state.keys() if key not in copied_keys
-        ]
-        for dst_key in unmatched_keys:
-            dst_value = raw_adapter_state[dst_key]
-            matched_src_key = None
-            for src_key in unused_src_keys:
-                src_value = adap_adapter_state[src_key]
-                if src_value.shape == dst_value.shape:
-                    matched_src_key = src_key
-                    new_adapter_state[dst_key] = src_value.to(
-                        device=dst_value.device, dtype=dst_value.dtype)
-                    copied_keys.append(dst_key)
-                    unused_src_keys.remove(src_key)
-                    break
-            if matched_src_key is None:
-                logger.warning('Skip loading adapter tensor `%s` into full '
-                               'model: no compatible tensor found.',
-                               dst_key)
+        elif _looks_like_layer_state_key(key):
+            logger.warning('Skip loading adapter tensor `%s` into full model: '
+                           'no exact key match. Shape fallback is disabled '
+                           'to avoid cross-layer parameter corruption.', key)
 
     raw_model.adapter.load_state_dict(new_adapter_state, strict=False)
     logger.info('Loaded %s/%s adapter tensors into full model.',

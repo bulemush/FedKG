@@ -58,6 +58,25 @@ def parse_args():
     parser.add_argument('--temperature', type=float, default=0.0)
     parser.add_argument('--top-p', type=float, default=1.0)
     parser.add_argument('--num-beams', type=int, default=1)
+    parser.add_argument('--instruction',
+                        default='',
+                        help='Optional instruction prepended to each question '
+                        'during evaluation.')
+    parser.add_argument('--candidate-file',
+                        default=None,
+                        help='Optional json/jsonl file with candidate answers. '
+                        'Each item should contain `idx`, `ID`, or `id`, and a '
+                        '`candidates`/`candidate_answers` list.')
+    parser.add_argument('--candidate-topk',
+                        type=int,
+                        default=32,
+                        help='Maximum number of candidates to rerank per '
+                        'question when --candidate-file or record candidates '
+                        'are available.')
+    parser.add_argument('--rerank-candidates',
+                        action='store_true',
+                        help='Use model log-likelihood to choose from KG '
+                        'candidate answers instead of free-form generation.')
     parser.add_argument('--allow-unlabeled',
                         action='store_true',
                         help='Allow evaluating/generating on splits without '
@@ -179,6 +198,94 @@ def _hit_at_1(prediction, answers):
     return int(pred != '' and pred in gold), pred, gold
 
 
+def _as_candidate_list(value):
+    if value in [None, '']:
+        return []
+    if isinstance(value, str):
+        pieces = re.split(r';|\n|\t', value)
+    elif isinstance(value, list):
+        pieces = value
+    else:
+        pieces = [value]
+
+    candidates = []
+    for item in pieces:
+        if isinstance(item, dict):
+            item = item.get('answer',
+                            item.get('entity_name',
+                                     item.get('label',
+                                              item.get('name', ''))))
+        item = str(item).strip()
+        if item and item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def _load_candidate_map(path):
+    if path in [None, '']:
+        return {}
+    if not os.path.exists(path):
+        raise FileNotFoundError(f'Candidate file not found: {path}')
+
+    if path.endswith('.jsonl'):
+        rows = [
+            json.loads(line)
+            for line in open(path, encoding='utf-8')
+            if line.strip()
+        ]
+    else:
+        with open(path, encoding='utf-8') as fin:
+            rows = json.load(fin)
+        if isinstance(rows, dict):
+            rows = rows.get('data', rows.get('items', rows))
+            if isinstance(rows, dict):
+                return {
+                    str(key): _as_candidate_list(value)
+                    for key, value in rows.items()
+                }
+
+    candidate_map = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        candidates = _as_candidate_list(
+            row.get('candidates', row.get('candidate_answers', [])))
+        for key in ['idx', 'ID', 'id', 'question_id', 'qid']:
+            if key in row:
+                candidate_map[str(row[key])] = candidates
+    return candidate_map
+
+
+def _record_candidates(record, idx, candidate_map, topk):
+    candidates = []
+    for key in ['candidates', 'candidate_answers', 'candidate_entities']:
+        candidates.extend(_as_candidate_list(record.get(key, [])))
+    for key in ['ID', 'id', 'question_id', 'qid']:
+        if key in record:
+            candidates.extend(candidate_map.get(str(record[key]), []))
+    candidates.extend(candidate_map.get(str(idx), []))
+
+    deduped = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    if topk > 0:
+        deduped = deduped[:topk]
+    return deduped
+
+
+def _apply_instruction(records, instruction):
+    instruction = str(instruction).strip()
+    if instruction == '':
+        return records
+    for record in records:
+        context = record.get('context', '')
+        if context.startswith(instruction):
+            continue
+        record['context'] = f'{instruction}\n{context}'
+    return records
+
+
 def _move_to_device(value, device):
     if torch.is_tensor(value):
         return value.to(device)
@@ -263,6 +370,64 @@ def _generate_one(bot, cfg, record, generation_kwargs):
     return bot.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
+@torch.no_grad()
+def _score_candidate(bot, cfg, record, candidate):
+    prompt = record['context']
+    full_text = prompt + ' ' + candidate
+    encoded = bot.tokenizer(full_text,
+                            return_tensors='pt',
+                            add_special_tokens=True,
+                            truncation=True,
+                            max_length=bot.tokenizer.model_max_length)
+    prompt_ids = bot.tokenizer(prompt,
+                               return_tensors='pt',
+                               add_special_tokens=True,
+                               truncation=True,
+                               max_length=bot.tokenizer.model_max_length)
+    device = bot._get_model_input_device()
+    encoded = {key: value.to(device) for key, value in encoded.items()}
+
+    labels = encoded['input_ids'].clone()
+    prompt_len = min(prompt_ids['input_ids'].shape[1], labels.shape[1])
+    labels[:, :prompt_len] = -100
+
+    model_kwargs = {}
+    if cfg.llm.kg_adapter.use:
+        instance = {
+            'input_ids': encoded['input_ids'][0],
+            'labels': encoded['input_ids'][0],
+        }
+        if 'sg' in record:
+            instance['sg'] = record['sg']
+        kg_batch = build_kg_batch([instance],
+                                  encoded['input_ids'].cpu(),
+                                  pad_id=bot.tokenizer.pad_token_id,
+                                  kg_cfg=cfg.llm.kg_adapter)
+        if kg_batch is not None:
+            model_kwargs['kg_inputs'] = _move_to_device(kg_batch, device)
+            model_kwargs['sg'] = model_kwargs['kg_inputs']
+
+    output = bot.model(**encoded, **model_kwargs)
+    logits = output.logits[:, :-1, :]
+    shift_labels = labels[:, 1:]
+    loss = torch.nn.functional.cross_entropy(
+        logits.reshape(-1, logits.size(-1)),
+        shift_labels.reshape(-1),
+        ignore_index=-100,
+        reduction='sum')
+    token_count = shift_labels.ne(-100).sum().clamp_min(1)
+    return -float(loss / token_count)
+
+
+def _rerank_candidates(bot, cfg, record, candidates):
+    scored = [
+        (_score_candidate(bot, cfg, record, candidate), candidate)
+        for candidate in candidates
+    ]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1], scored
+
+
 def main():
     args = parse_args()
     cfg = _load_cfg(args)
@@ -274,8 +439,10 @@ def main():
     bot = ExactCheckpointBot(cfg, ckpt_path)
     split_path, records = _load_records(cfg, dataset_name, args.split,
                                         bot.tokenizer)
+    records = _apply_instruction(records, args.instruction)
     if args.limit > 0:
         records = records[:args.limit]
+    candidate_map = _load_candidate_map(args.candidate_file)
     unlabeled_num = sum(1 for record in records
                         if not str(record.get('target', '')).strip())
     if unlabeled_num > 0 and not args.allow_unlabeled:
@@ -313,7 +480,15 @@ def main():
     correct = 0
     with open(output_path, 'w', encoding='utf-8') as fout:
         for idx, record in enumerate(tqdm(records, desc='Evaluating hit@1')):
-            prediction = _generate_one(bot, cfg, record, generation_kwargs)
+            candidates = _record_candidates(record, idx, candidate_map,
+                                            args.candidate_topk)
+            candidate_scores = []
+            if args.rerank_candidates and candidates:
+                prediction, candidate_scores = _rerank_candidates(
+                    bot, cfg, record, candidates)
+            else:
+                prediction = _generate_one(bot, cfg, record,
+                                           generation_kwargs)
             answers = [
                 answer.strip()
                 for answer in record.get('target', '').split(';')
@@ -333,6 +508,8 @@ def main():
                         'answers': answers,
                         'answers_norm': normalized_gold,
                         'hit': hit,
+                        'candidates': candidates,
+                        'candidate_scores': candidate_scores[:10],
                     },
                     ensure_ascii=False) + '\n')
 

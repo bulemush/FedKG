@@ -418,12 +418,15 @@ def load_llm_dataset(config=None, **kwargs):
 
     elif dataset_name.lower() == 'offsite_tuning':
         from federatedscope.llm.dataloader.offsite_tuning_dataset import \
-            PIQA, HellaSwag, OpenBookQA, ARC, SciQ, WebQs, RACE
+            PIQA, HellaSwag, OpenBookQA, OpenBookQAMCQA, CommonsenseQA, \
+            ARC, SciQ, WebQs, RACE
         # list of dataset
         task_dict = {
             "piqa": PIQA(),
             "hellaswag": HellaSwag(),
             "openbookqa": OpenBookQA(),
+            "openbookqa_mcqa": OpenBookQAMCQA(),
+            "commonsenseqa": CommonsenseQA(),
             "arc_easy": ARC(name='ARC-Easy'),
             "arc_challenge": ARC(name='ARC-Challenge'),
             "sciq": SciQ(),
@@ -453,6 +456,33 @@ def load_llm_dataset(config=None, **kwargs):
                                   prompt_input='{context}',
                                   output_tag='target')
 
+        dataset = (train_dataset, val_dataset, test_dataset)
+
+    elif dataset_name.lower() in ['openbookqa_mcqa', 'commonsenseqa',
+                                  'commonsense_qa']:
+        from federatedscope.llm.dataloader.offsite_tuning_dataset import \
+            OpenBookQAMCQA, CommonsenseQA
+        task_cls = OpenBookQAMCQA if dataset_name.lower() == \
+            'openbookqa_mcqa' else CommonsenseQA
+        task = task_cls()
+        list_train_dict = task.get_data_dict(label='train')
+        list_val_dict = task.get_data_dict(label='validation')
+        list_test_dict = task.get_data_dict(label='test')
+        train_dataset = LLMDataset(list_train_dict,
+                                   tokenizer,
+                                   prompt_no_input='{context}',
+                                   prompt_input='{context}',
+                                   output_tag='target')
+        val_dataset = LLMDataset(list_val_dict,
+                                 tokenizer,
+                                 prompt_no_input='{context}',
+                                 prompt_input='{context}',
+                                 output_tag='target')
+        test_dataset = LLMDataset(list_test_dict,
+                                  tokenizer,
+                                  prompt_no_input='{context}',
+                                  prompt_input='{context}',
+                                  output_tag='target')
         dataset = (train_dataset, val_dataset, test_dataset)
 
     elif dataset_name.lower() == 'wikitext-2':
