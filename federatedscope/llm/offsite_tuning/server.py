@@ -16,7 +16,8 @@ from federatedscope.core.auxiliaries.trainer_builder import get_trainer
 from federatedscope.core.workers.server import Server
 
 from federatedscope.llm.offsite_tuning.utils import \
-    generate_adap_model, align_student_with_teacher
+    generate_adap_model, align_student_with_teacher, \
+    load_adapter_state_from_adap_model
 from federatedscope.llm.model.adapter_builder import maybe_shard_model, \
     _scale_max_memory
 
@@ -257,10 +258,9 @@ class OffsiteTuningServer(Server):
         if self._cfg.llm.offsite_tuning.eval_type == 'full':
             if not self._periodic_emu_align_enabled:
                 self.model.to('cpu')
+            load_adapter_state_from_adap_model(self.raw_model, self.model)
             new_raw_model_state_dict = self.raw_model.state_dict(
                 return_trainable=False)
-            for key, value in self.model.state_dict().items():
-                new_raw_model_state_dict[key] = value
             self.raw_model_trainer.update(new_raw_model_state_dict,
                                           strict=False)
             # make the evaluation on raw model at the server first

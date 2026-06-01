@@ -303,6 +303,53 @@ def convert_layers_train_state(layers, name_pattern=None, is_trainable=True):
                 param.requires_grad = False
 
 
+def load_adapter_state_from_adap_model(raw_model, adap_model):
+    if not hasattr(raw_model, 'adapter') or not hasattr(adap_model, 'adapter'):
+        raise AttributeError('Both raw_model and adap_model must have an '
+                             '`adapter` attribute.')
+
+    raw_adapter_state = raw_model.adapter.state_dict()
+    adap_adapter_state = adap_model.adapter.state_dict()
+    new_adapter_state = copy.copy(raw_adapter_state)
+    copied_keys = []
+    unmatched_keys = []
+
+    for key, dst_value in raw_adapter_state.items():
+        src_value = adap_adapter_state.get(key, None)
+        if src_value is not None and src_value.shape == dst_value.shape:
+            new_adapter_state[key] = src_value.to(device=dst_value.device,
+                                                  dtype=dst_value.dtype)
+            copied_keys.append(key)
+        else:
+            unmatched_keys.append(key)
+
+    if unmatched_keys:
+        unused_src_keys = [
+            key for key in adap_adapter_state.keys() if key not in copied_keys
+        ]
+        for dst_key in unmatched_keys:
+            dst_value = raw_adapter_state[dst_key]
+            matched_src_key = None
+            for src_key in unused_src_keys:
+                src_value = adap_adapter_state[src_key]
+                if src_value.shape == dst_value.shape:
+                    matched_src_key = src_key
+                    new_adapter_state[dst_key] = src_value.to(
+                        device=dst_value.device, dtype=dst_value.dtype)
+                    copied_keys.append(dst_key)
+                    unused_src_keys.remove(src_key)
+                    break
+            if matched_src_key is None:
+                logger.warning('Skip loading adapter tensor `%s` into full '
+                               'model: no compatible tensor found.',
+                               dst_key)
+
+    raw_model.adapter.load_state_dict(new_adapter_state, strict=False)
+    logger.info('Loaded %s/%s adapter tensors into full model.',
+                len(copied_keys), len(raw_adapter_state))
+    return len(copied_keys)
+
+
 def build_cfg_for_alignment(config):
     new_cfg = copy.deepcopy(config)
     new_cfg.defrost()
@@ -476,12 +523,7 @@ def wrap_offsite_tuning_for_eval(model, config, ckpt_path=None):
         # Raw model load adapter from adapter_and_emulator
         logger.info("Evaluating for full+adapter...")
         print("Evaluating for full+adapter...")
-        new_model_adapter_state_dict = model.adapter.state_dict()
-        for key, value in zip(new_model_adapter_state_dict.keys(),
-                              adap_model.adapter.state_dict().values()):
-            new_model_adapter_state_dict[key] = value
-        model.adapter.load_state_dict(new_model_adapter_state_dict,
-                                      strict=False)
+        load_adapter_state_from_adap_model(model, adap_model)
         del adap_model
     else:
         raise NotImplementedError(

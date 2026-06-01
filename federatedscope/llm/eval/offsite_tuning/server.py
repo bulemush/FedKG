@@ -9,7 +9,8 @@ from federatedscope.core.auxiliaries.trainer_builder import get_trainer
 from federatedscope.core.workers.server import Server
 
 from federatedscope.llm.offsite_tuning.utils import \
-    generate_adap_model, align_student_with_teacher
+    generate_adap_model, align_student_with_teacher, \
+    load_adapter_state_from_adap_model
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +99,9 @@ class OffsiteTuningServer(Server):
         # Update the raw model with the new adapters
         if self._cfg.llm.offsite_tuning.eval_type == 'full':
             self.model.to('cpu')
+            load_adapter_state_from_adap_model(self.raw_model, self.model)
             new_raw_model_state_dict = self.raw_model.state_dict(
                 return_trainable=False)
-            for key, value in zip(self.raw_model.adapter.state_dict().keys(),
-                                  self.model.adapter.state_dict().values()):
-                new_raw_model_state_dict[key] = value
             self.raw_model_trainer.update(new_raw_model_state_dict,
                                           strict=False)
             # make the evaluation on raw model at the server first
