@@ -250,29 +250,51 @@ def encode_text_ids(tokenizer, text, max_len=16):
 
 def build_sg(tokenizer, selected_nodes, local_edges, edge_types, id2node, id2rel,
              args):
-    if not selected_nodes:
-        selected_nodes = [0]
-    edge_index = [[], []]
-    for src, dst in local_edges:
-        edge_index[0].append(src)
-        edge_index[1].append(dst)
+    valid_nodes = []
+    old_to_new = {}
+    for old_idx, node_id in enumerate(selected_nodes):
+        if 0 <= int(node_id) < len(id2node):
+            old_to_new[old_idx] = len(valid_nodes)
+            valid_nodes.append(int(node_id))
 
-    x = torch.tensor([
-        stable_vocab_id(id2node[node_id], args.entity_vocab_size)
-        for node_id in selected_nodes
-    ],
-                     dtype=torch.long)
+    if not valid_nodes:
+        valid_nodes = [0] if len(id2node) > 0 else []
+
+    edge_index = [[], []]
+    valid_edge_types = []
+    for (src, dst), rel_id in zip(local_edges, edge_types):
+        if src in old_to_new and dst in old_to_new and \
+                0 <= int(rel_id) < len(id2rel):
+            edge_index[0].append(old_to_new[src])
+            edge_index[1].append(old_to_new[dst])
+            valid_edge_types.append(int(rel_id))
+
+    if valid_nodes:
+        x = torch.tensor([
+            stable_vocab_id(id2node[node_id], args.entity_vocab_size)
+            for node_id in valid_nodes
+        ],
+                         dtype=torch.long)
+        nid2swid = [
+            encode_text_ids(tokenizer, id2node[node_id])
+            for node_id in valid_nodes
+        ]
+    else:
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None \
+            else 0
+        x = torch.zeros(1, dtype=torch.long)
+        nid2swid = [[pad_id]]
+
     edge_index = torch.tensor(edge_index, dtype=torch.long)
     edge_type = torch.tensor(
-        [rel_id % max(int(args.relation_vocab_size), 1) for rel_id in edge_types],
+        [
+            rel_id % max(int(args.relation_vocab_size), 1)
+            for rel_id in valid_edge_types
+        ],
         dtype=torch.long)
-    nid2swid = [
-        encode_text_ids(tokenizer, id2node[node_id])
-        for node_id in selected_nodes
-    ]
     eid2swid = [
         encode_text_ids(tokenizer, relation_text(id2rel[rel_id]))
-        for rel_id in edge_types
+        for rel_id in valid_edge_types
     ]
 
     if Data is None:
