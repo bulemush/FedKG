@@ -5,9 +5,9 @@ early_stop:
 federate:
   mode: standalone
   client_num: 3
-  total_round_num: 100
+  total_round_num: 200
   save_to: "checkpoints/llama.cwq.webqsp.kg_adpt2.dp2.fedbiot.ckpt"
-  save_freq: 50
+  save_freq: 10
   share_local_model: True
   online_aggr: False
 data:
@@ -21,12 +21,16 @@ data:
   } ]
 llm:
   grad_accum_step: 2
-  tok_len: 800
+  tok_len: 1024
   chat:
     max_len: 300
   model_parallel:
     use: True
     device_map: 'balanced_layers'
+    coexisting_model_ratio: 0.45
+    max_memory:
+      '0': '14GiB'
+      '1': '22GiB'
     same_device_map: False
   adapter:
     use: True
@@ -41,7 +45,7 @@ llm:
     gnn_backend: 'paper'
     paper_gnn_path: 'federatedscope/llm/kg_adapter/paper_gnn/GNN.py'
     use_srgat: False
-    num_relations: 38
+    num_relations: 1024
     keep_ratio: 1.0
     max_node_num_per_batch: 2500
     use_edge_emb: True
@@ -60,8 +64,8 @@ llm:
       use: True
       initial_only: True
       periodic: True
-      periodic_interval: 1
-      periodic_start_round: 0
+      periodic_interval: 5
+      periodic_start_round: 5
       periodic_save: False
       sim_loss: 'l2'
       layerwise_distill: False
@@ -100,6 +104,11 @@ eval:
   freq: 5
   metrics: ['loss']
   best_res_update_round_wise_key: 'val_loss'
+  kgqa:
+    split: 'val'
+    limit: 1000
+    match_mode: 'contains'
+    select_metric: 'hit@1'
   report: ['weighted_avg', 'avg', 'raw']
   count_flops: False
 expname: "fedbiot/llama-7b_cwq_webqsp_offsite_kg_adpt2_dp2"

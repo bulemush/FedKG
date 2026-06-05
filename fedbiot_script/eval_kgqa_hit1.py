@@ -38,8 +38,9 @@ def parse_args():
                         help='Override dataset type inferred from cfg.')
     parser.add_argument('--split',
                         choices=['test', 'val'],
-                        default='test',
-                        help='Evaluation split.')
+                        default=None,
+                        help='Evaluation split. Defaults to '
+                        'cfg.eval.kgqa.split when set, otherwise test.')
     parser.add_argument('--ckpt',
                         default=None,
                         help='Checkpoint path. Defaults to cfg.federate.save_to '
@@ -77,6 +78,14 @@ def parse_args():
                         action='store_true',
                         help='Use model log-likelihood to choose from KG '
                         'candidate answers instead of free-form generation.')
+    parser.add_argument('--match-mode',
+                        choices=['contains', 'exact'],
+                        default=None,
+                        help='Hit@1 matching mode. `contains` matches the '
+                        'KGQA convention used by KG-Adapter; `exact` keeps '
+                        'the previous strict normalized exact match. Defaults '
+                        'to cfg.eval.kgqa.match_mode when set, otherwise '
+                        'contains.')
     parser.add_argument('--allow-unlabeled',
                         action='store_true',
                         help='Allow evaluating/generating on splits without '
@@ -112,6 +121,26 @@ def _load_cfg(args):
     update_logger(cfg, clear_before_add=True)
     setup_seed(cfg.seed)
     return cfg
+
+
+def _cfg_get(cfg_node, key, default=None):
+    if cfg_node is None:
+        return default
+    if isinstance(cfg_node, dict):
+        return cfg_node.get(key, default)
+    return getattr(cfg_node, key, default)
+
+
+def _apply_eval_defaults(args, cfg):
+    kgqa_eval = _cfg_get(_cfg_get(cfg, 'eval', None), 'kgqa', None)
+    if args.split is None:
+        args.split = str(_cfg_get(kgqa_eval, 'split', 'test')).lower()
+    if args.match_mode is None:
+        args.match_mode = str(
+            _cfg_get(kgqa_eval, 'match_mode', 'contains')).lower()
+    if args.limit < 0:
+        args.limit = int(_cfg_get(kgqa_eval, 'limit', -1))
+    return args
 
 
 def _infer_dataset_name(cfg, override):
@@ -176,8 +205,10 @@ def _strip_prediction(text):
                   '',
                   text,
                   flags=re.IGNORECASE)
-    text = text.split(';')[0]
-    text = text.split(',')[0] if len(text.split(',')) <= 3 else text
+    text = re.split(r'\b(because|therefore|so the answer is)\b',
+                    text,
+                    maxsplit=1,
+                    flags=re.IGNORECASE)[0]
     return text.strip()
 
 
@@ -190,12 +221,63 @@ def _normalize_answer(text):
     return text
 
 
-def _hit_at_1(prediction, answers):
+def _hit_at_1(prediction, answers, match_mode='contains'):
     if len(answers) == 0:
-        return 0, _normalize_answer(_strip_prediction(prediction)), []
+        pred = _normalize_answer(_strip_prediction(prediction))
+        return 0, pred, [], 0
     pred = _normalize_answer(_strip_prediction(prediction))
-    gold = [_normalize_answer(answer) for answer in answers]
-    return int(pred != '' and pred in gold), pred, gold
+    gold = []
+    for answer in answers:
+        normalized = _normalize_answer(answer)
+        if normalized and normalized not in gold:
+            gold.append(normalized)
+
+    exact_hit = int(pred != '' and pred in gold)
+    if match_mode == 'exact':
+        return exact_hit, pred, gold, exact_hit
+
+    padded_pred = f' {pred} '
+    contains_hit = int(pred != '' and any(
+        f' {answer} ' in padded_pred for answer in gold))
+    return contains_hit, pred, gold, exact_hit
+
+
+def _answers_from_raw_record(record):
+    answers = []
+    raw_answers = record.get('answers', record.get('answer', []))
+    if isinstance(raw_answers, list):
+        for raw_answer in raw_answers:
+            if isinstance(raw_answer, dict):
+                for key in ['answer', 'entity_name', 'name', 'label']:
+                    value = raw_answer.get(key, None)
+                    if value not in [None, '']:
+                        answers.append(str(value).strip())
+                aliases = raw_answer.get('aliases', [])
+                if isinstance(aliases, list):
+                    answers.extend(str(alias).strip() for alias in aliases)
+                elif aliases not in [None, '']:
+                    answers.append(str(aliases).strip())
+            elif raw_answer not in [None, '']:
+                answers.append(str(raw_answer).strip())
+    elif raw_answers not in [None, '']:
+        answers.append(str(raw_answers).strip())
+    return answers
+
+
+def _record_answers(record):
+    answers = [
+        answer.strip()
+        for answer in record.get('target', '').split(';')
+        if answer.strip()
+    ]
+    answers.extend(_as_candidate_list(record.get('answer_aliases', [])))
+    answers.extend(_answers_from_raw_record(record))
+
+    deduped = []
+    for answer in answers:
+        if answer and answer not in deduped:
+            deduped.append(answer)
+    return deduped
 
 
 def _as_candidate_list(value):
@@ -431,6 +513,7 @@ def _rerank_candidates(bot, cfg, record, candidates):
 def main():
     args = parse_args()
     cfg = _load_cfg(args)
+    args = _apply_eval_defaults(args, cfg)
     dataset_name = _infer_dataset_name(cfg, args.dataset)
     ckpt_path = cfg.federate.save_to
     if not os.path.exists(ckpt_path):
@@ -478,6 +561,7 @@ def main():
     }
 
     correct = 0
+    exact_correct = 0
     with open(output_path, 'w', encoding='utf-8') as fout:
         for idx, record in enumerate(tqdm(records, desc='Evaluating hit@1')):
             candidates = _record_candidates(record, idx, candidate_map,
@@ -489,14 +573,11 @@ def main():
             else:
                 prediction = _generate_one(bot, cfg, record,
                                            generation_kwargs)
-            answers = [
-                answer.strip()
-                for answer in record.get('target', '').split(';')
-                if answer.strip()
-            ]
-            hit, normalized_pred, normalized_gold = _hit_at_1(
-                prediction, answers)
+            answers = _record_answers(record)
+            hit, normalized_pred, normalized_gold, exact_hit = _hit_at_1(
+                prediction, answers, args.match_mode)
             correct += hit
+            exact_correct += exact_hit
             fout.write(
                 json.dumps(
                     {
@@ -508,6 +589,8 @@ def main():
                         'answers': answers,
                         'answers_norm': normalized_gold,
                         'hit': hit,
+                        'exact_hit': exact_hit,
+                        'match_mode': args.match_mode,
                         'candidates': candidates,
                         'candidate_scores': candidate_scores[:10],
                     },
@@ -515,6 +598,7 @@ def main():
 
     total = len(records)
     hit1 = 0.0 if total == 0 else 100.0 * correct / total
+    exact_hit1 = 0.0 if total == 0 else 100.0 * exact_correct / total
     total_params, trainable_params = _count_parameters(bot.model)
     with open(summary_path, 'w', encoding='utf-8', newline='') as fout:
         writer = csv.DictWriter(fout,
@@ -522,7 +606,8 @@ def main():
                                     'dataset', 'split', 'checkpoint',
                                     'data_file', 'base_model', 'total_params',
                                     'trainable_params', 'total', 'correct',
-                                    'hit@1'
+                                    'hit@1', 'exact_correct', 'exact@1',
+                                    'match_mode'
                                 ])
         writer.writeheader()
         writer.writerow({
@@ -536,10 +621,14 @@ def main():
             'total': total,
             'correct': correct,
             'hit@1': f'{hit1:.2f}',
+            'exact_correct': exact_correct,
+            'exact@1': f'{exact_hit1:.2f}',
+            'match_mode': args.match_mode,
         })
 
     print(f'{dataset_name.upper()} {args.split} hit@1: {hit1:.2f} '
           f'({correct}/{total})')
+    print(f'Exact hit@1: {exact_hit1:.2f} ({exact_correct}/{total})')
     print(f'Predictions: {output_path}')
     print(f'Summary: {summary_path}')
 

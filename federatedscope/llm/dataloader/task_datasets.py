@@ -272,6 +272,32 @@ def _extract_cwq_answers(item):
     return dedup_answers
 
 
+def _extract_cwq_answer_aliases(item):
+    raw_answers = item.get('answers', item.get('answer', []))
+    aliases = []
+    if not isinstance(raw_answers, list):
+        return aliases
+
+    for answer in raw_answers:
+        if not isinstance(answer, dict):
+            continue
+        values = []
+        canonical = answer.get('answer', None)
+        if canonical not in [None, '']:
+            values.append(canonical)
+        raw_aliases = answer.get('aliases', [])
+        if isinstance(raw_aliases, list):
+            values.extend(raw_aliases)
+        elif raw_aliases not in [None, '']:
+            values.append(raw_aliases)
+
+        for value in values:
+            value = str(value).strip()
+            if value and value not in aliases:
+                aliases.append(value)
+    return aliases
+
+
 def _build_cwq_sg(item, context_text, tokenizer, config):
     sparql = item.get('sparql', item.get('Sparql', ''))
     triples = _parse_sparql_triples(sparql)
@@ -506,15 +532,17 @@ def _format_cwq_item(item, tokenizer=None, config=None, split_name=None):
     if not answers and split_flag != 'test':
         return None
     target = '; '.join(answers) if answers else ''
+    answer_aliases = _extract_cwq_answer_aliases(item)
     record = _merge_extra_fields(
         dict(context=f'Question: {str(question).strip()}\nAnswer:',
              target=target,
+             answer_aliases=answer_aliases,
              category=item.get('compositionality_type',
                                item.get('category', 'complexwebquestions'))),
         item,
         excluded_keys={
             'question', 'machine_question', 'webqsp_question', 'answers',
-            'answer', 'category'
+            'answer', 'answer_aliases', 'category'
         })
     if tokenizer is not None and config is not None and _kg_enabled(config):
         record['sg'] = _build_cwq_sg(item, record['context'], tokenizer,
