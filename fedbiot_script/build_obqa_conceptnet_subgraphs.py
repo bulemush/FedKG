@@ -1,5 +1,6 @@
 import argparse
 import ast
+import argparse
 import csv
 import gzip
 import hashlib
@@ -136,11 +137,13 @@ def load_conceptnet(path, min_concept_len=2, undirected=False):
 
     open_fn = gzip.open if str(path).endswith('.gz') else open
     with open_fn(path, 'rt', encoding='utf-8') as fin:
-        sample = fin.read(4096)
-        fin.seek(0)
-        dialect = csv.Sniffer().sniff(sample, delimiters='\t,')
-        reader = csv.reader(fin, dialect)
-        for row in tqdm(reader, desc='Loading ConceptNet'):
+        for line in tqdm(fin, desc='Loading ConceptNet'):
+            row = line.rstrip('\n').split('\t')
+            if len(row) < 4:
+                try:
+                    row = next(csv.reader([line]))
+                except Exception:
+                    row = []
             if len(row) < 4:
                 continue
             if row[0] == 'uri' and row[1] == 'rel':
@@ -161,6 +164,9 @@ def load_conceptnet(path, min_concept_len=2, undirected=False):
             adjacency[src_id].append((dst_id, rel_id, weight, edge_id))
             if undirected:
                 adjacency[dst_id].append((src_id, rel_id, weight, edge_id))
+
+    print(f'Accepted English ConceptNet: {len(node2id)} nodes, '
+          f'{len(edges)} edges, {len(rel2id)} relations')
 
     for node_id in list(adjacency.keys()):
         adjacency[node_id].sort(key=lambda item: item[2], reverse=True)
