@@ -12,9 +12,15 @@ federate:
   online_aggr: False
 data:
   root: data/
-  type: 'openbookqa_mcqa@llm'
+  type: 'openbookqa_conceptnet@llm'
   splits: [0.8, 0.1, 0.1]
   splitter: 'iid'
+  args: [ {
+    'version': 'obqa_conceptnet_3hop',
+    'train_file': 'train_obqa_conceptnet_3hop.pt',
+    'val_file': 'dev_obqa_conceptnet_3hop.pt',
+    'test_file': 'test_obqa_conceptnet_3hop.pt'
+  } ]
 llm:
   grad_accum_step: 2
   tok_len: 800
@@ -32,7 +38,24 @@ llm:
     use: True
     args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05 } ]
   kg_adapter:
-    use: False
+    use: True
+    entity_vocab_size: 50000
+    edge_vocab_size: 64
+    entity_hidden_size: 256
+    num_heads: 4
+    dropout: 0.05
+    gnn_backend: 'paper'
+    paper_gnn_path: 'federatedscope/llm/kg_adapter/paper_gnn/GNN.py'
+    use_srgat: True
+    num_relations: 64
+    keep_ratio: 0.8
+    max_node_num_per_batch: 1500
+    use_edge_emb: True
+    use_gnn: True
+    use_trips: True
+    use_joint_reasoning: True
+    adapter_last_n: 0
+    mix_emb: True
   offsite_tuning:
     use: True
     save_full_model: True
@@ -52,13 +75,9 @@ llm:
       kl_divergence: 'raw'
       data:
         root: data/
-        type: 'webquestionssp@llm'
+        type: 'commonsenseqa@llm'
         splits: [0.9, 0.1, 0.0]
         splitter: 'iid'
-        args: [ {
-          'train_file': 'WebQSP/data/WebQSP.train.json',
-          'test_file': 'WebQSP/data/WebQSP.test.json'
-        } ]
       train:
         local_update_steps: 5
         initial_update_rounds: 50
