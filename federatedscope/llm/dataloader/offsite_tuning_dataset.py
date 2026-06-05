@@ -1,5 +1,35 @@
 import re
+import os
 import datasets
+import pandas as pd
+
+
+def _find_openbookqa_root():
+    candidates = [
+        os.path.join('data', 'openbookQA', 'main'),
+        os.path.join('data', 'openbookqa', 'main'),
+        os.path.join('data', 'OpenBookQA', 'main'),
+    ]
+    for root in candidates:
+        if os.path.exists(os.path.join(root,
+                                       'train-00000-of-00001.parquet')):
+            return root
+    return None
+
+
+def _load_local_openbookqa():
+    root = _find_openbookqa_root()
+    if root is None:
+        return None
+    split_files = {
+        'train': 'train-00000-of-00001.parquet',
+        'validation': 'validation-00000-of-00001.parquet',
+        'test': 'test-00000-of-00001.parquet',
+    }
+    return {
+        split: pd.read_parquet(os.path.join(root, file_name))
+        for split, file_name in split_files.items()
+    }
 
 
 class PIQA:
@@ -74,8 +104,9 @@ class HellaSwag:
 
 class OpenBookQA:
     def __init__(self):
-        # Download datasets
-        self.dataset = datasets.load_dataset('openbookqa')
+        self.dataset = _load_local_openbookqa()
+        if self.dataset is None:
+            self.dataset = datasets.load_dataset('openbookqa')
 
     def get_context(self, examples):
         return examples['question_stem']
@@ -135,7 +166,9 @@ class MCQATask:
 
 class OpenBookQAMCQA(MCQATask):
     def __init__(self):
-        self.dataset = datasets.load_dataset('openbookqa')
+        self.dataset = _load_local_openbookqa()
+        if self.dataset is None:
+            self.dataset = datasets.load_dataset('openbookqa')
         self.question_key = 'question_stem'
 
     def get_data_dict(self, label='train'):
