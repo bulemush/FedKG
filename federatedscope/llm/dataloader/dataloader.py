@@ -11,6 +11,7 @@ from transformers import GenerationConfig
 from tqdm import tqdm
 
 from dataclasses import dataclass
+from torch.utils.data import Dataset
 from federatedscope.llm.dataset.llm_dataset import DefaultToken, \
     LLMDataset, PROMPT_DICT
 from federatedscope.core.data.utils import download_url
@@ -26,6 +27,59 @@ def _parse_model_type(model_type):
     if '@' in model_type:
         return model_type.split('@', 1)
     return model_type, 'huggingface_llm'
+
+
+def _cfg_data_args(config):
+    if hasattr(config.data, 'args') and len(config.data.args) > 0:
+        return config.data.args[0]
+    return {}
+
+
+def _join_path(root, path):
+    if path is None or path == '':
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.join(root, path)
+
+
+class PreprocessedLLMDataset(Dataset):
+    def __init__(self, path):
+        self.data = torch.load(path, map_location='cpu')
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        item = self.data[index]
+        result = {
+            'input_ids': item['input_ids'].long(),
+            'labels': item['labels'].long(),
+            'categories': 0,
+        }
+        for key in ['sg', 'kg_inputs']:
+            if key in item and item[key] is not None:
+                result[key] = item[key]
+        return result
+
+
+def load_preprocessed_llm_dataset(config):
+    args = _cfg_data_args(config)
+    version = args.get('version', 'obqa_conceptnet_3hop')
+    train_file = args.get('train_file', f'train_{version}.pt')
+    val_file = args.get('val_file', f'dev_{version}.pt')
+    test_file = args.get('test_file', f'test_{version}.pt')
+
+    train_path = _join_path(config.data.root, train_file)
+    val_path = _join_path(config.data.root, val_file)
+    test_path = _join_path(config.data.root, test_file)
+    for path in [train_path, val_path, test_path]:
+        if path is None or not os.path.exists(path):
+            raise FileNotFoundError(f'Preprocessed LLM data not found: {path}')
+
+    return (PreprocessedLLMDataset(train_path),
+            PreprocessedLLMDataset(val_path),
+            PreprocessedLLMDataset(test_path))
 
 
 @dataclass
@@ -374,6 +428,10 @@ def load_llm_dataset(config=None, **kwargs):
 
     elif dataset_name.lower() in ['complexwebquestions', 'cwq']:
         dataset = load_complexwebquestions_llm_dataset(config, tokenizer)
+
+    elif dataset_name.lower() in ['openbookqa_conceptnet',
+                                  'openbookqa_mcqa_kg']:
+        dataset = load_preprocessed_llm_dataset(config)
 
     elif dataset_name.lower() == 'code_search_net':
         from federatedscope.llm.dataset.code_search_net import \
