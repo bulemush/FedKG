@@ -9,6 +9,12 @@ import torch
 import transformers
 from tqdm import tqdm
 
+try:
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+except Exception:
+    pass
+
 from federatedscope.core.auxiliaries.logging import update_logger
 from federatedscope.core.auxiliaries.utils import setup_seed
 from federatedscope.core.cmd_args import parse_client_cfg
@@ -140,6 +146,17 @@ def _count_parameters(model):
 
 
 class ExactCheckpointBot(FSChatBot):
+    def _prepare_inference_model(self):
+        if not self._model_has_device_map() and \
+                not self._model_uses_multiple_devices():
+            if torch.cuda.is_available() and torch.cuda.device_count() > 1 \
+                    and hasattr(self.model, 'sharding'):
+                self.model.sharding()
+            else:
+                self.model = self.model.to(self.device)
+
+        self.model = self.model.eval()
+
     def __init__(self, config, ckpt_path):
         self.config = config
         self.device = f'cuda:{config.device}'
