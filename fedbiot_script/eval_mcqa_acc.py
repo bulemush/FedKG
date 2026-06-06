@@ -38,6 +38,22 @@ def parse_args():
     parser.add_argument('--temperature', type=float, default=0.0)
     parser.add_argument('--top-p', type=float, default=1.0)
     parser.add_argument('--num-beams', type=int, default=1)
+    parser.add_argument('--eval-mode',
+                        choices=['generate', 'choice_score'],
+                        default='generate',
+                        help='generate: free-form generation then map to a '
+                        'choice; choice_score: rank choices by conditional '
+                        'log-likelihood.')
+    parser.add_argument('--score-target',
+                        choices=['choice_text', 'label'],
+                        default='choice_text',
+                        help='Candidate text used by choice_score. '
+                        'choice_text matches the current preprocessed '
+                        'OpenBookQA training target.')
+    parser.add_argument('--length-norm',
+                        choices=['mean', 'sum'],
+                        default='mean',
+                        help='Normalize candidate log-likelihood by length.')
     parser.add_argument('opts',
                         nargs=argparse.REMAINDER,
                         help='Optional cfg overrides after --, e.g. -- device 0')
@@ -225,6 +241,25 @@ def _build_generation_inputs(bot, cfg, record):
     return prompt, encoded, model_kwargs
 
 
+def _build_kg_kwargs(bot, cfg, record, input_ids, device):
+    model_kwargs = {}
+    if cfg.llm.kg_adapter.use:
+        instance = {
+            'input_ids': input_ids[0].detach().cpu(),
+            'labels': input_ids[0].detach().cpu(),
+        }
+        if 'sg' in record:
+            instance['sg'] = record['sg']
+        kg_batch = build_kg_batch([instance],
+                                  input_ids.detach().cpu(),
+                                  pad_id=bot.tokenizer.pad_token_id,
+                                  kg_cfg=cfg.llm.kg_adapter)
+        if kg_batch is not None:
+            model_kwargs['kg_inputs'] = _move_to_device(kg_batch, device)
+            model_kwargs['sg'] = model_kwargs['kg_inputs']
+    return model_kwargs
+
+
 @torch.no_grad()
 def _generate_one(bot, cfg, record, generation_kwargs):
     _, encoded, model_kwargs = _build_generation_inputs(bot, cfg, record)
@@ -232,6 +267,66 @@ def _generate_one(bot, cfg, record, generation_kwargs):
     output_ids = bot.model.generate(**encoded, **model_kwargs, **kwargs)
     new_tokens = output_ids[0, encoded['input_ids'].shape[1]:]
     return bot.tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
+def _candidate_text(label, choice, score_target):
+    if score_target == 'label':
+        return label
+    return str(choice).strip()
+
+
+@torch.no_grad()
+def _score_choice(bot, cfg, record, prompt_ids, candidate_ids, length_norm):
+    device = bot._get_model_input_device()
+    full_ids = torch.cat([prompt_ids, candidate_ids], dim=1).to(device)
+    attention_mask = torch.ones_like(full_ids, device=device)
+    model_kwargs = _build_kg_kwargs(bot, cfg, record, full_ids, device)
+    outputs = bot.model(input_ids=full_ids,
+                        attention_mask=attention_mask,
+                        use_cache=False,
+                        **model_kwargs)
+    logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
+    start = prompt_ids.size(1)
+    token_scores = []
+    log_probs = torch.log_softmax(logits[0, start - 1:-1, :].float(), dim=-1)
+    target_ids = full_ids[0, start:]
+    for pos, token_id in enumerate(target_ids):
+        token_scores.append(log_probs[pos, token_id].item())
+    if not token_scores:
+        return float('-inf')
+    total = sum(token_scores)
+    if length_norm == 'mean':
+        return total / len(token_scores)
+    return total
+
+
+def _choice_by_score(bot, cfg, record, score_target, length_norm):
+    prompt = _prompt_from_record(record, bot.tokenizer)
+    device = bot._get_model_input_device()
+    prompt_encoded = bot.tokenizer(prompt,
+                                   return_tensors='pt',
+                                   add_special_tokens=True,
+                                   truncation=True,
+                                   max_length=bot.tokenizer.model_max_length)
+    prompt_ids = prompt_encoded['input_ids'].to(device)
+
+    scores = {}
+    choices = record.get('choices', [])
+    for idx, choice in enumerate(choices):
+        label = chr(ord('A') + idx)
+        candidate = _candidate_text(label, choice, score_target)
+        candidate_ids = bot.tokenizer(' ' + candidate,
+                                      return_tensors='pt',
+                                      add_special_tokens=False).input_ids
+        candidate_ids = candidate_ids.to(device)
+        scores[label] = _score_choice(bot, cfg, record, prompt_ids,
+                                      candidate_ids, length_norm)
+    if not scores:
+        return '', '', {}
+    pred_label = max(scores, key=scores.get)
+    prediction_clean = choices[ord(pred_label) - ord('A')] \
+        if score_target == 'choice_text' else pred_label
+    return pred_label, prediction_clean, scores
 
 
 def _gold_label(record):
@@ -288,9 +383,17 @@ def main():
     correct = 0
     with open(output_path, 'w', encoding='utf-8') as fout:
         for idx, record in enumerate(tqdm(records, desc='Evaluating MCQA')):
-            prediction = _generate_one(bot, cfg, record, generation_kwargs)
-            pred_label, prediction_clean = _choice_from_prediction(
-                prediction, record.get('choices', []))
+            choice_scores = {}
+            if args.eval_mode == 'choice_score':
+                pred_label, prediction_clean, choice_scores = \
+                    _choice_by_score(bot, cfg, record, args.score_target,
+                                     args.length_norm)
+                prediction = prediction_clean
+            else:
+                prediction = _generate_one(bot, cfg, record,
+                                           generation_kwargs)
+                pred_label, prediction_clean = _choice_from_prediction(
+                    prediction, record.get('choices', []))
             gold = _gold_label(record)
             hit = int(pred_label != '' and pred_label == gold)
             correct += hit
@@ -304,6 +407,7 @@ def main():
                         'prediction': prediction,
                         'prediction_clean': prediction_clean,
                         'pred_label': pred_label,
+                        'choice_scores': choice_scores,
                         'gold': gold,
                         'answer': record.get('answer', ''),
                         'hit': hit,
@@ -317,9 +421,11 @@ def main():
         writer = csv.DictWriter(fout,
                                 fieldnames=[
                                     'dataset', 'split', 'checkpoint',
-                                    'data_file', 'base_model', 'total_params',
-                                    'trainable_params', 'total', 'correct',
-                                    'accuracy'
+                                    'data_file', 'eval_mode',
+                                    'score_target', 'length_norm',
+                                    'base_model', 'total_params',
+                                    'trainable_params', 'total',
+                                    'correct', 'accuracy'
                                 ])
         writer.writeheader()
         writer.writerow({
@@ -327,6 +433,9 @@ def main():
             'split': args.split,
             'checkpoint': ckpt_path,
             'data_file': split_path,
+            'eval_mode': args.eval_mode,
+            'score_target': args.score_target,
+            'length_norm': args.length_norm,
             'base_model': cfg.model.type,
             'total_params': total_params,
             'trainable_params': trainable_params,
