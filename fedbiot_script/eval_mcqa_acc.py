@@ -60,6 +60,26 @@ def parse_args():
                         choices=['mean', 'sum'],
                         default='mean',
                         help='Normalize candidate log-likelihood by length.')
+    parser.add_argument('--dump-sg',
+                        action='store_true',
+                        help='Append the retrieved KG subgraph to each '
+                        'prediction JSONL record.')
+    parser.add_argument('--sg-output',
+                        default=None,
+                        help='Optional JSONL path for writing only retrieved '
+                        'KG subgraphs.')
+    parser.add_argument('--print-sg',
+                        action='store_true',
+                        help='Print a compact retrieved KG subgraph summary '
+                        'for each evaluated example.')
+    parser.add_argument('--sg-max-nodes',
+                        type=int,
+                        default=40,
+                        help='Maximum nodes to serialize or print per subgraph.')
+    parser.add_argument('--sg-max-edges',
+                        type=int,
+                        default=80,
+                        help='Maximum edges to serialize or print per subgraph.')
     parser.add_argument('opts',
                         nargs=argparse.REMAINDER,
                         help='Optional cfg overrides after --, e.g. -- device 0')
@@ -143,6 +163,198 @@ def _count_parameters(model):
     trainable = sum(param.numel() for param in model.parameters()
                     if param.requires_grad)
     return total, trainable
+
+
+def _graph_get(graph, key, default=None):
+    if graph is None:
+        return default
+    if isinstance(graph, dict):
+        return graph.get(key, default)
+    try:
+        return graph[key]
+    except Exception:
+        return getattr(graph, key, default)
+
+
+def _graph_keys(graph):
+    if graph is None:
+        return []
+    if isinstance(graph, dict):
+        return sorted(str(key) for key in graph.keys())
+    keys = getattr(graph, 'keys', None)
+    if callable(keys):
+        try:
+            return sorted(str(key) for key in keys())
+        except TypeError:
+            pass
+    if isinstance(keys, (list, tuple, set)):
+        return sorted(str(key) for key in keys)
+    if hasattr(graph, '__dict__'):
+        return sorted(
+            str(key) for key in graph.__dict__.keys()
+            if not str(key).startswith('_'))
+    return []
+
+
+def _to_list(value):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        return value.detach().cpu().tolist()
+    if isinstance(value, tuple):
+        return [_to_list(item) for item in value]
+    if isinstance(value, list):
+        return [_to_list(item) for item in value]
+    try:
+        return value.tolist()
+    except Exception:
+        return value
+
+
+def _as_token_row(value):
+    value = _to_list(value)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        value = [value]
+    if value and isinstance(value[0], list):
+        flattened = []
+        for row in value:
+            flattened.extend(_as_token_row(row))
+        return flattened
+    tokens = []
+    for item in value:
+        try:
+            tokens.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return tokens
+
+
+def _decode_token_row(tokenizer, value):
+    token_ids = _as_token_row(value)
+    pad_id = tokenizer.pad_token_id
+    token_ids = [
+        token_id for token_id in token_ids
+        if token_id >= 0 and (pad_id is None or token_id != pad_id)
+    ]
+    if not token_ids:
+        return ''
+    return tokenizer.decode(token_ids, skip_special_tokens=True).strip()
+
+
+def _edge_pairs(edge_index):
+    edge_index = _to_list(edge_index)
+    if not edge_index:
+        return []
+    if len(edge_index) == 2 and all(isinstance(row, list) for row in edge_index):
+        return [
+            [int(src), int(dst)]
+            for src, dst in zip(edge_index[0], edge_index[1])
+        ]
+    pairs = []
+    for item in edge_index:
+        if isinstance(item, list) and len(item) >= 2:
+            pairs.append([int(item[0]), int(item[1])])
+    return pairs
+
+
+def _serialize_retrieval_subgraph(record, tokenizer, max_nodes, max_edges):
+    graph = record.get('sg', record.get('kg_inputs', None))
+    if graph is None:
+        return {
+            'available': False,
+            'raw_keys': [],
+            'num_nodes': 0,
+            'num_edges': 0,
+            'nodes': [],
+            'edges': [],
+        }
+
+    node_ids = _to_list(_graph_get(graph, 'x', _graph_get(graph, 'node_ids')))
+    if node_ids is None:
+        node_ids = _to_list(_graph_get(graph, 'entity_ids'))
+    if not isinstance(node_ids, list):
+        node_ids = []
+    if node_ids and isinstance(node_ids[0], list):
+        node_ids = node_ids[0]
+
+    node_type = _to_list(_graph_get(graph, 'node_type'))
+    if not isinstance(node_type, list):
+        node_type = []
+    if node_type and isinstance(node_type[0], list):
+        node_type = node_type[0]
+
+    nid2swid = _to_list(_graph_get(graph, 'nid2swid'))
+    if not isinstance(nid2swid, list):
+        nid2swid = []
+
+    edge_type = _to_list(_graph_get(graph, 'edge_type',
+                                    _graph_get(graph, 'relation_ids')))
+    if not isinstance(edge_type, list):
+        edge_type = []
+    if edge_type and isinstance(edge_type[0], list):
+        edge_type = edge_type[0]
+
+    eid2swid = _to_list(_graph_get(graph, 'eid2swid'))
+    if not isinstance(eid2swid, list):
+        eid2swid = []
+
+    pairs = _edge_pairs(_graph_get(graph, 'edge_index'))
+    node_limit = max(0, int(max_nodes))
+    edge_limit = max(0, int(max_edges))
+
+    nodes = []
+    for idx, node_id in enumerate(node_ids[:node_limit]):
+        node = {
+            'idx': idx,
+            'entity_id': int(node_id),
+            'text': _decode_token_row(tokenizer, nid2swid[idx])
+            if idx < len(nid2swid) else '',
+        }
+        if idx < len(node_type):
+            node['node_type'] = int(node_type[idx])
+        nodes.append(node)
+
+    edges = []
+    for idx, pair in enumerate(pairs[:edge_limit]):
+        edge = {
+            'idx': idx,
+            'src': int(pair[0]),
+            'dst': int(pair[1]),
+            'relation_id': int(edge_type[idx]) if idx < len(edge_type) else 0,
+            'text': _decode_token_row(tokenizer, eid2swid[idx])
+            if idx < len(eid2swid) else '',
+        }
+        edges.append(edge)
+
+    return {
+        'available': True,
+        'raw_keys': _graph_keys(graph),
+        'num_nodes': len(node_ids),
+        'num_edges': len(pairs),
+        'truncated': {
+            'nodes': len(node_ids) > node_limit,
+            'edges': len(pairs) > edge_limit,
+        },
+        'nodes': nodes,
+        'edges': edges,
+    }
+
+
+def _print_retrieval_subgraph(idx, subgraph):
+    print(f'[{idx}] subgraph: {subgraph["num_nodes"]} nodes, '
+          f'{subgraph["num_edges"]} edges')
+    if not subgraph['available']:
+        print('  <no subgraph>')
+        return
+    node_text = ', '.join(
+        f'{node["idx"]}:{node["text"] or node["entity_id"]}'
+        for node in subgraph['nodes'])
+    print(f'  nodes: {node_text}')
+    for edge in subgraph['edges']:
+        rel = edge['text'] or edge['relation_id']
+        print(f'  edge {edge["idx"]}: {edge["src"]} -[{rel}]-> {edge["dst"]}')
 
 
 class ExactCheckpointBot(FSChatBot):
@@ -380,6 +592,10 @@ def main():
         cfg.outdir, f'openbookqa_{args.split}_mcqa_summary.csv')
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+    if args.sg_output:
+        sg_output_dir = os.path.dirname(args.sg_output)
+        if sg_output_dir:
+            os.makedirs(sg_output_dir, exist_ok=True)
 
     generation_kwargs = {
         'max_new_tokens': args.max_new_tokens,
@@ -398,38 +614,68 @@ def main():
     }
 
     correct = 0
-    with open(output_path, 'w', encoding='utf-8') as fout:
-        for idx, record in enumerate(tqdm(records, desc='Evaluating MCQA')):
-            choice_scores = {}
-            if args.eval_mode == 'choice_score':
-                pred_label, prediction_clean, choice_scores = \
-                    _choice_by_score(bot, cfg, record, args.score_target,
-                                     args.length_norm)
-                prediction = prediction_clean
-            else:
-                prediction = _generate_one(bot, cfg, record,
-                                           generation_kwargs)
-                pred_label, prediction_clean = _choice_from_prediction(
-                    prediction, record.get('choices', []))
-            gold = _gold_label(record)
-            hit = int(pred_label != '' and pred_label == gold)
-            correct += hit
-            fout.write(
-                json.dumps(
-                    {
-                        'idx': idx,
-                        'id': record.get('id', ''),
-                        'question': record.get('question', ''),
-                        'choices': record.get('choices', []),
-                        'prediction': prediction,
-                        'prediction_clean': prediction_clean,
-                        'pred_label': pred_label,
-                        'choice_scores': choice_scores,
-                        'gold': gold,
-                        'answer': record.get('answer', ''),
-                        'hit': hit,
-                    },
-                    ensure_ascii=False) + '\n')
+    sg_fout = open(args.sg_output, 'w',
+                   encoding='utf-8') if args.sg_output else None
+    try:
+        with open(output_path, 'w', encoding='utf-8') as fout:
+            for idx, record in enumerate(tqdm(records, desc='Evaluating MCQA')):
+                choice_scores = {}
+                if args.eval_mode == 'choice_score':
+                    pred_label, prediction_clean, choice_scores = \
+                        _choice_by_score(bot, cfg, record, args.score_target,
+                                         args.length_norm)
+                    prediction = prediction_clean
+                else:
+                    prediction = _generate_one(bot, cfg, record,
+                                               generation_kwargs)
+                    pred_label, prediction_clean = _choice_from_prediction(
+                        prediction, record.get('choices', []))
+                gold = _gold_label(record)
+                hit = int(pred_label != '' and pred_label == gold)
+                correct += hit
+
+                subgraph = None
+                if args.dump_sg or args.sg_output or args.print_sg:
+                    subgraph = _serialize_retrieval_subgraph(
+                        record,
+                        bot.tokenizer,
+                        max_nodes=args.sg_max_nodes,
+                        max_edges=args.sg_max_edges)
+                    if args.print_sg:
+                        _print_retrieval_subgraph(idx, subgraph)
+                    if sg_fout is not None:
+                        sg_fout.write(
+                            json.dumps(
+                                {
+                                    'idx': idx,
+                                    'id': record.get('id', ''),
+                                    'question': record.get('question', ''),
+                                    'gold': gold,
+                                    'answer': record.get('answer', ''),
+                                    'hit': hit,
+                                    'retrieval_subgraph': subgraph,
+                                },
+                                ensure_ascii=False) + '\n')
+
+                output_record = {
+                    'idx': idx,
+                    'id': record.get('id', ''),
+                    'question': record.get('question', ''),
+                    'choices': record.get('choices', []),
+                    'prediction': prediction,
+                    'prediction_clean': prediction_clean,
+                    'pred_label': pred_label,
+                    'choice_scores': choice_scores,
+                    'gold': gold,
+                    'answer': record.get('answer', ''),
+                    'hit': hit,
+                }
+                if args.dump_sg:
+                    output_record['retrieval_subgraph'] = subgraph
+                fout.write(json.dumps(output_record, ensure_ascii=False) + '\n')
+    finally:
+        if sg_fout is not None:
+            sg_fout.close()
 
     total = len(records)
     acc = 0.0 if total == 0 else 100.0 * correct / total
@@ -465,6 +711,8 @@ def main():
           f'({correct}/{total})')
     print(f'Predictions: {output_path}')
     print(f'Summary: {summary_path}')
+    if args.sg_output:
+        print(f'Retrieval subgraphs: {args.sg_output}')
 
 
 if __name__ == '__main__':

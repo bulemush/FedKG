@@ -6,8 +6,8 @@ federate:
   mode: standalone
   client_num: 3
   total_round_num: 200
-  save_to: "checkpoints/llama.openbookqa.commonsenseqa.adpt2.dp2.fedbiot.ckpt"
-  save_freq: 100
+  save_to: "checkpoints/llama.openbookqa.webqsp.adpt2.dp2.fedbiot.ckpt"
+  save_freq: 10
   share_local_model: True
   online_aggr: False
 data:
@@ -67,8 +67,8 @@ llm:
       use: True
       initial_only: True
       periodic: True
-      periodic_interval: 1
-      periodic_start_round: 0
+      periodic_interval: 5
+      periodic_start_round: 5
       periodic_save: False
       sim_loss: 'l2'
       layerwise_distill: False
