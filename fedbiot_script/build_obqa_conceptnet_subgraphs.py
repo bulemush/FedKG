@@ -1,6 +1,5 @@
 import argparse
 import ast
-import argparse
 import csv
 import gzip
 import hashlib
@@ -27,6 +26,34 @@ OBQA_INSTRUCTION = (
     "multiple choice task, you will be given a question and options, and you "
     "need to select the correct option. First output the correct answer."
 )
+
+STOPWORD_TOKENS = {
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'because', 'before', 'by',
+    'can', 'could', 'do', 'does', 'for', 'from', 'has', 'have', 'he', 'her',
+    'his', 'if', 'in', 'is', 'it', 'may', 'might', 'of', 'on', 'or', 'she',
+    'some', 'that', 'the', 'their', 'there', 'these', 'this', 'to', 'was',
+    'what', 'when', 'where', 'which', 'who', 'why', 'with', 'would'
+}
+
+STOP_CONCEPTS = {
+    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'before', 'by', 'for', 'from',
+    'has', 'he', 'his', 'if', 'in', 'is', 'it', 'may', 'may be', 'might',
+    'of', 'on', 'she', 'some', 'that', 'the', 'their', 'to', 'what',
+    'what is', 'when', 'where', 'which', 'with', 'would', 'in order',
+    'in order to', 'of water', 'water in', 'water on', 'wants to', 'makes sure',
+    'pick up', 'coming from', 'living there'
+}
+
+LOW_VALUE_RELATIONS = {
+    'RelatedTo', 'Synonym', 'DerivedFrom', 'EtymologicallyRelatedTo', 'FormOf',
+    'HasContext', 'Antonym'
+}
+
+HIGH_VALUE_RELATIONS = {
+    'AtLocation', 'CapableOf', 'Causes', 'CausesDesire', 'Entails', 'HasA',
+    'HasPrerequisite', 'HasProperty', 'IsA', 'MadeOf', 'MotivatedByGoal',
+    'PartOf', 'ReceivesAction', 'UsedFor'
+}
 
 
 def parse_args():
@@ -58,6 +85,26 @@ def parse_args():
     parser.add_argument('--min-concept-len', type=int, default=2)
     parser.add_argument('--entity-vocab-size', type=int, default=50000)
     parser.add_argument('--relation-vocab-size', type=int, default=64)
+    parser.add_argument('--filter-stopwords',
+                        action='store_true',
+                        help='Drop stopword-only concepts and common function '
+                        'phrases from retrieval seeds and expansion nodes.')
+    parser.add_argument('--relation-filter',
+                        choices=['none', 'allowlist', 'drop-low-value'],
+                        default='none',
+                        help='Filter ConceptNet relations before retrieval.')
+    parser.add_argument('--relation-allowlist',
+                        default=','.join(sorted(HIGH_VALUE_RELATIONS)),
+                        help='Comma-separated relations to keep when '
+                        '--relation-filter=allowlist.')
+    parser.add_argument('--drop-relations',
+                        default=','.join(sorted(LOW_VALUE_RELATIONS)),
+                        help='Comma-separated relations to drop when '
+                        '--relation-filter=drop-low-value.')
+    parser.add_argument('--query-prioritize',
+                        action='store_true',
+                        help='Prefer neighbors whose concepts overlap with '
+                        'question/choice content words during graph expansion.')
     parser.add_argument('--undirected', action='store_true',
                         help='Add reverse adjacency during retrieval.')
     parser.add_argument('--limit', type=int, default=-1,
@@ -94,6 +141,36 @@ def relation_text(relation):
     return normalize_text(relation)
 
 
+def parse_name_set(value):
+    if value in [None, '']:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        return {str(item).strip() for item in value if str(item).strip()}
+    return {item.strip() for item in str(value).split(',') if item.strip()}
+
+
+def is_noise_concept(concept):
+    concept = normalize_text(concept)
+    if concept in STOP_CONCEPTS:
+        return True
+    tokens = tokenize_words(concept)
+    if not tokens:
+        return True
+    if len(tokens) == 1 and tokens[0] in STOPWORD_TOKENS:
+        return True
+    return all(token in STOPWORD_TOKENS for token in tokens)
+
+
+def relation_allowed(relation, args):
+    if args.relation_filter == 'none':
+        return True
+    if args.relation_filter == 'allowlist':
+        return relation in parse_name_set(args.relation_allowlist)
+    if args.relation_filter == 'drop-low-value':
+        return relation not in parse_name_set(args.drop_relations)
+    return True
+
+
 def stable_vocab_id(text, vocab_size):
     vocab_size = max(int(vocab_size), 2)
     digest = hashlib.md5(str(text).encode('utf-8')).hexdigest()
@@ -119,7 +196,10 @@ def parse_weight(data):
         return 1.0
 
 
-def load_conceptnet(path, min_concept_len=2, undirected=False):
+def load_conceptnet(path,
+                    args,
+                    min_concept_len=2,
+                    undirected=False):
     node2id = {}
     rel2id = {}
     edges = []
@@ -149,11 +229,16 @@ def load_conceptnet(path, min_concept_len=2, undirected=False):
             if row[0] == 'uri' and row[1] == 'rel':
                 continue
             rel = relation_from_uri(row[1])
+            if not relation_allowed(rel, args):
+                continue
             src = concept_from_uri(row[2])
             dst = concept_from_uri(row[3])
             if not src or not dst:
                 continue
             if len(src) < min_concept_len or len(dst) < min_concept_len:
+                continue
+            if args.filter_stopwords and \
+                    (is_noise_concept(src) or is_noise_concept(dst)):
                 continue
             weight = parse_weight(row[4]) if len(row) > 4 else 1.0
             src_id = get_node_id(src)
@@ -184,13 +269,33 @@ def tokenize_words(text):
     return re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", str(text).lower())
 
 
-def extract_ngram_seeds(text, node2id, max_ngram=5, max_seeds=32):
+def query_terms_from_text(text):
+    return {
+        token
+        for token in tokenize_words(text)
+        if token not in STOPWORD_TOKENS and len(token) > 1
+    }
+
+
+def concept_overlap_score(concept, query_terms):
+    if not query_terms:
+        return 0
+    return len(set(tokenize_words(concept)) & query_terms)
+
+
+def extract_ngram_seeds(text,
+                        node2id,
+                        max_ngram=5,
+                        max_seeds=32,
+                        filter_stopwords=False):
     words = tokenize_words(text)
     seeds = []
     seen = set()
     for ngram_len in range(max_ngram, 0, -1):
         for start in range(0, max(0, len(words) - ngram_len + 1)):
             concept = normalize_text(' '.join(words[start:start + ngram_len]))
+            if filter_stopwords and is_noise_concept(concept):
+                continue
             if concept in node2id and concept not in seen:
                 seen.add(concept)
                 seeds.append(node2id[concept])
@@ -199,8 +304,19 @@ def extract_ngram_seeds(text, node2id, max_ngram=5, max_seeds=32):
     return seeds
 
 
-def retrieve_subgraph(seeds, adjacency, edges, hop, max_nodes, max_edges,
-                      max_neighbors_per_node):
+def rank_neighbor(candidate, edges, id2node, id2rel, query_terms):
+    dst_id, rel_id, weight, edge_id = candidate
+    relation = id2rel[rel_id] if 0 <= rel_id < len(id2rel) else ''
+    dst_concept = id2node[dst_id] if 0 <= dst_id < len(id2node) else ''
+    relation_bonus = 1 if relation in HIGH_VALUE_RELATIONS else 0
+    overlap = concept_overlap_score(dst_concept, query_terms)
+    _, _, _, edge_weight = edges[edge_id]
+    return relation_bonus, overlap, float(edge_weight or weight or 0.0)
+
+
+def retrieve_subgraph(seeds, adjacency, edges, id2node, id2rel, hop, max_nodes,
+                      max_edges, max_neighbors_per_node, query_terms,
+                      query_prioritize, filter_stopwords):
     if not seeds:
         return [], [], []
 
@@ -220,8 +336,16 @@ def retrieve_subgraph(seeds, adjacency, edges, hop, max_nodes, max_edges,
         node_id, depth = queue.popleft()
         if depth >= hop:
             continue
-        for dst_id, _, _, edge_id in adjacency.get(node_id, [])[
-                :max_neighbors_per_node]:
+        candidates = adjacency.get(node_id, [])
+        if query_prioritize:
+            candidates = sorted(
+                candidates,
+                key=lambda item: rank_neighbor(item, edges, id2node, id2rel,
+                                               query_terms),
+                reverse=True)
+        for dst_id, _, _, edge_id in candidates[:max_neighbors_per_node]:
+            if filter_stopwords and is_noise_concept(id2node[dst_id]):
+                continue
             if edge_id not in edge_seen:
                 edge_seen.add(edge_id)
                 selected_edge_ids.append(edge_id)
@@ -361,15 +485,22 @@ def build_item(row, tokenizer, node2id, id2node, id2rel, edges, adjacency, args)
     seeds = extract_ngram_seeds(retrieval_text,
                                 node2id,
                                 max_ngram=args.max_ngram,
-                                max_seeds=args.max_seeds)
+                                max_seeds=args.max_seeds,
+                                filter_stopwords=args.filter_stopwords)
+    query_terms = query_terms_from_text(retrieval_text)
     selected_nodes, local_edges, edge_types = retrieve_subgraph(
         seeds,
         adjacency,
         edges,
+        id2node,
+        id2rel,
         hop=args.hop,
         max_nodes=args.max_nodes,
         max_edges=args.max_edges,
-        max_neighbors_per_node=args.max_neighbors_per_node)
+        max_neighbors_per_node=args.max_neighbors_per_node,
+        query_terms=query_terms,
+        query_prioritize=args.query_prioritize,
+        filter_stopwords=args.filter_stopwords)
     sg = build_sg(tokenizer, selected_nodes, local_edges, edge_types, id2node,
                   id2rel, args)
 
@@ -443,6 +574,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
 
     kg = load_conceptnet(args.conceptnet,
+                         args,
                          min_concept_len=args.min_concept_len,
                          undirected=args.undirected)
     node2id, id2node, rel2id, id2rel, _, _ = kg
