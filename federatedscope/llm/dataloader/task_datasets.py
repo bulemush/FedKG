@@ -376,6 +376,309 @@ def _build_cwq_sg(item, context_text, tokenizer, config):
     }
 
 
+_NODE_TYPE_IDS = {
+    'class': 1,
+    'entity': 2,
+    'literal': 4,
+    'variable': 3,
+    'program': 5,
+}
+
+
+def _dedup_keep_order(values):
+    deduped = []
+    for value in values:
+        if value in [None, '']:
+            continue
+        value = str(value).strip()
+        if value and value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def _extract_named_answers(item):
+    raw_answers = item.get('answers', item.get('answer', []))
+    if raw_answers in [None, '']:
+        return []
+    if not isinstance(raw_answers, list):
+        raw_answers = [raw_answers]
+
+    answers = []
+    for answer in raw_answers:
+        if isinstance(answer, dict):
+            value = answer.get('entity_name',
+                               answer.get('answer',
+                                          answer.get('answer_argument',
+                                                     answer.get('name',
+                                                                answer.get(
+                                                                    'label',
+                                                                    None)))))
+            answers.append(value)
+        else:
+            answers.append(answer)
+    return _dedup_keep_order(answers)
+
+
+def _extract_answer_aliases(item):
+    raw_answers = item.get('answers', item.get('answer', []))
+    if raw_answers in [None, '']:
+        return []
+    if not isinstance(raw_answers, list):
+        raw_answers = [raw_answers]
+
+    aliases = []
+    for answer in raw_answers:
+        if not isinstance(answer, dict):
+            continue
+        aliases.extend([
+            answer.get('answer_argument', None),
+            answer.get('answer_id', None),
+            answer.get('entity_name', None),
+            answer.get('answer', None),
+            answer.get('name', None),
+            answer.get('label', None),
+        ])
+        raw_aliases = answer.get('aliases', [])
+        if isinstance(raw_aliases, list):
+            aliases.extend(raw_aliases)
+        elif raw_aliases not in [None, '']:
+            aliases.append(raw_aliases)
+    return _dedup_keep_order(aliases)
+
+
+def _graph_query_node_text(node):
+    return node.get('friendly_name',
+                    node.get('name',
+                             node.get('id',
+                                      node.get('class',
+                                               node.get('node_type',
+                                                        'node')))))
+
+
+def _build_graph_query_sg(item, context_text, tokenizer, config):
+    graph_query = item.get('graph_query', {})
+    if not isinstance(graph_query, dict):
+        graph_query = {}
+
+    raw_nodes = graph_query.get('nodes', [])
+    raw_edges = graph_query.get('edges', [])
+    entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
+
+    node_specs = []
+    node_index_by_nid = {}
+    for fallback_idx, node in enumerate(raw_nodes):
+        if not isinstance(node, dict):
+            continue
+        nid = node.get('nid', fallback_idx)
+        node_key = node.get('id', node.get('class', f'node:{nid}'))
+        node_text = _graph_query_node_text(node)
+        node_kind = str(node.get('node_type', 'entity')).lower()
+        mention = node_text if str(node_text).lower() in \
+            str(context_text).lower() else ''
+        node_index_by_nid[nid] = len(node_specs)
+        node_specs.append({
+            'key': node_key,
+            'text': node_text,
+            'mention': mention,
+            'type': _NODE_TYPE_IDS.get(node_kind, 0),
+        })
+
+    edges = []
+    for edge in raw_edges:
+        if not isinstance(edge, dict):
+            continue
+        src_key = edge.get('start', None)
+        dst_key = edge.get('end', None)
+        if src_key not in node_index_by_nid or dst_key not in node_index_by_nid:
+            continue
+        relation = edge.get('relation',
+                            edge.get('friendly_name', 'related_to'))
+        edges.append((node_index_by_nid[src_key], node_index_by_nid[dst_key],
+                      relation))
+
+    if len(node_specs) == 0:
+        question = item.get('question', item.get('Question', 'question'))
+        node_specs.append({
+            'key': f'question::{question}',
+            'text': str(question),
+            'mention': str(question),
+            'type': 0,
+        })
+
+    node_ids = [_stable_vocab_id(node['key'], entity_vocab_size)
+                for node in node_specs]
+    node_type = [node['type'] for node in node_specs]
+    edge_index = [
+        [src for src, _, _ in edges],
+        [dst for _, dst, _ in edges],
+    ] if edges else [[], []]
+    edge_type = [_stable_relation_id(rel, config) for _, _, rel in edges]
+    nid2swid = [_encode_text_ids(tokenizer, node['text']) for node in node_specs]
+    eid2swid = [_encode_text_ids(tokenizer, rel) for _, _, rel in edges]
+    align_mask = _build_align_mask(tokenizer,
+                                   context_text,
+                                   [node['mention'] for node in node_specs])
+
+    return {
+        'node_ids': node_ids,
+        'node_type': node_type,
+        'edge_index': edge_index,
+        'edge_type': edge_type,
+        'nid2swid': nid2swid,
+        'eid2swid': eid2swid,
+        'align_mask': align_mask,
+        'token_entity_ids': _build_token_entity_ids_from_align(align_mask),
+    }
+
+
+def _strip_angle_token(token):
+    token = str(token).strip()
+    if token.startswith('<') and token.endswith('>'):
+        token = token[1:-1]
+    if token.startswith('pred:'):
+        token = token[5:]
+    return token
+
+
+def _parse_kqapro_sparql_triples(sparql):
+    if sparql in [None, '']:
+        return []
+    triple_pattern = re.compile(
+        r'(?P<src>\?[A-Za-z_][\w]*|\[[^\]]+\]|<[^>]+>|\"[^\"]*\"[^\s]*)\s+'
+        r'(?P<rel><[^>]+>)\s+'
+        r'(?P<dst>\?[A-Za-z_][\w]*|<[^>]+>|\"[^\"]*\"[^\s]*)\s+\.')
+    triples = []
+    for match in triple_pattern.finditer(str(sparql)):
+        triples.append((_strip_angle_token(match.group('src')),
+                        _strip_angle_token(match.group('rel')),
+                        _strip_angle_token(match.group('dst'))))
+    return triples
+
+
+def _program_step_label(step, idx):
+    function = step.get('function', f'step_{idx}')
+    inputs = step.get('inputs', [])
+    if isinstance(inputs, list) and inputs:
+        return f'{function}: {", ".join(str(item) for item in inputs)}'
+    return str(function)
+
+
+def _build_kqapro_sg(item, context_text, tokenizer, config):
+    triples = _parse_kqapro_sparql_triples(item.get('sparql', ''))
+    entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
+    node_specs = []
+    node_index = {}
+    edges = []
+
+    def ensure_node(node_key):
+        if node_key in node_index:
+            return node_index[node_key]
+        if str(node_key).startswith('?'):
+            node_text = f'variable {str(node_key)[1:]}'
+            mention = ''
+            node_type = _NODE_TYPE_IDS['variable']
+        else:
+            node_text = str(node_key).replace('_', ' ')
+            mention = node_text if node_text.lower() in \
+                str(context_text).lower() else ''
+            node_type = _NODE_TYPE_IDS['entity']
+        node_index[node_key] = len(node_specs)
+        node_specs.append({
+            'key': node_key,
+            'text': node_text,
+            'mention': mention,
+            'type': node_type,
+        })
+        return node_index[node_key]
+
+    for src, rel, dst in triples:
+        src_idx = ensure_node(src)
+        dst_idx = ensure_node(dst)
+        edges.append((src_idx, dst_idx, rel))
+
+    if not edges:
+        program = item.get('program', [])
+        if isinstance(program, list):
+            for idx, step in enumerate(program):
+                if not isinstance(step, dict):
+                    continue
+                step_key = f'program:{idx}:{step.get("function", "step")}'
+                node_index[step_key] = len(node_specs)
+                node_specs.append({
+                    'key': step_key,
+                    'text': _program_step_label(step, idx),
+                    'mention': '',
+                    'type': _NODE_TYPE_IDS['program'],
+                })
+            for idx, step in enumerate(program):
+                if not isinstance(step, dict):
+                    continue
+                dst_key = f'program:{idx}:{step.get("function", "step")}'
+                dst_idx = node_index.get(dst_key, None)
+                if dst_idx is None:
+                    continue
+                dependencies = step.get('dependencies', [])
+                if not isinstance(dependencies, list):
+                    dependencies = []
+                for dep in dependencies:
+                    src_key = None
+                    try:
+                        dep_idx = int(dep)
+                        dep_step = program[dep_idx]
+                        if isinstance(dep_step, dict):
+                            src_key = \
+                                f'program:{dep_idx}:{dep_step.get("function", "step")}'
+                    except Exception:
+                        src_key = None
+                    if src_key in node_index:
+                        edges.append((node_index[src_key], dst_idx,
+                                      step.get('function', 'depends_on')))
+                if not dependencies and idx > 0:
+                    prev_step = program[idx - 1]
+                    if isinstance(prev_step, dict):
+                        prev_key = \
+                            f'program:{idx - 1}:{prev_step.get("function", "step")}'
+                        if prev_key in node_index:
+                            edges.append((node_index[prev_key], dst_idx,
+                                          step.get('function', 'next')))
+
+    if len(node_specs) == 0:
+        question = item.get('question', 'question')
+        node_specs.append({
+            'key': f'question::{question}',
+            'text': str(question),
+            'mention': str(question),
+            'type': 0,
+        })
+    if len(edges) == 0 and len(node_specs) > 0:
+        edges.append((0, 0, 'program.self'))
+
+    node_ids = [_stable_vocab_id(node['key'], entity_vocab_size)
+                for node in node_specs]
+    node_type = [node['type'] for node in node_specs]
+    edge_index = [
+        [src for src, _, _ in edges],
+        [dst for _, dst, _ in edges],
+    ] if edges else [[], []]
+    edge_type = [_stable_relation_id(rel, config) for _, _, rel in edges]
+    nid2swid = [_encode_text_ids(tokenizer, node['text']) for node in node_specs]
+    eid2swid = [_encode_text_ids(tokenizer, rel) for _, _, rel in edges]
+    align_mask = _build_align_mask(tokenizer,
+                                   context_text,
+                                   [node['mention'] for node in node_specs])
+
+    return {
+        'node_ids': node_ids,
+        'node_type': node_type,
+        'edge_index': edge_index,
+        'edge_type': edge_type,
+        'nid2swid': nid2swid,
+        'eid2swid': eid2swid,
+        'align_mask': align_mask,
+        'token_entity_ids': _build_token_entity_ids_from_align(align_mask),
+    }
+
+
 def _cfg_data_args(config):
     if hasattr(config.data, 'args') and len(config.data.args) > 0:
         return config.data.args[0]
@@ -547,6 +850,108 @@ def _format_cwq_item(item, tokenizer=None, config=None, split_name=None):
     if tokenizer is not None and config is not None and _kg_enabled(config):
         record['sg'] = _build_cwq_sg(item, record['context'], tokenizer,
                                      config)
+    return record
+
+
+def _format_grailqa_item(item, tokenizer=None, config=None, split_name=None):
+    question = item.get('question', item.get('Question', None))
+    if question is None:
+        return None
+    answers = _extract_named_answers(item)
+    split_flag = str(item.get('split', split_name or '')).lower()
+    if not answers and split_flag not in ['test', 'public_test']:
+        return None
+
+    target = '; '.join(answers) if answers else ''
+    answer_aliases = _extract_answer_aliases(item)
+    category = item.get('level',
+                        item.get('function',
+                                 item.get('category', 'grailqa')))
+    if not target and category in [None, '']:
+        category = 'grailqa'
+    record = _merge_extra_fields(
+        dict(context=f'Question: {str(question).strip()}\nAnswer:',
+             target=target,
+             answer_aliases=answer_aliases,
+             category=category,
+             dataset='grailqa',
+             qid=item.get('qid', item.get('id', None))),
+        item,
+        excluded_keys={
+            'question', 'Question', 'answer', 'answers', 'answer_aliases',
+            'category'
+        })
+    if tokenizer is not None and config is not None and _kg_enabled(config):
+        record['sg'] = _build_graph_query_sg(item, record['context'],
+                                             tokenizer, config)
+    return record
+
+
+def _format_graphquestions_item(item,
+                                tokenizer=None,
+                                config=None,
+                                split_name=None):
+    question = item.get('question', item.get('Question', None))
+    if question is None:
+        return None
+    answers = _extract_named_answers(item)
+    split_flag = str(item.get('split', split_name or '')).lower()
+    if not answers and split_flag != 'test':
+        return None
+
+    record = _merge_extra_fields(
+        dict(context=f'Question: {str(question).strip()}\nAnswer:',
+             target='; '.join(answers) if answers else '',
+             answer_aliases=_extract_answer_aliases(item),
+             category=item.get('function',
+                               item.get('category', 'graphquestions')),
+             dataset='graphquestions',
+             qid=item.get('qid', item.get('id', None))),
+        item,
+        excluded_keys={
+            'question', 'Question', 'answer', 'answers', 'answer_aliases',
+            'category'
+        })
+    if tokenizer is not None and config is not None and _kg_enabled(config):
+        record['sg'] = _build_graph_query_sg(item, record['context'],
+                                             tokenizer, config)
+    return record
+
+
+def _format_kqapro_item(item, tokenizer=None, config=None, split_name=None):
+    question = item.get('question', item.get('Question', None))
+    if question is None:
+        return None
+    answers = _extract_named_answers(item)
+    split_flag = str(item.get('split', split_name or '')).lower()
+    if not answers and split_flag != 'test':
+        return None
+
+    program = item.get('program', [])
+    category = item.get('category', None)
+    if category in [None, ''] and isinstance(program, list) and program:
+        for step in reversed(program):
+            if isinstance(step, dict) and step.get('function', None):
+                category = step['function']
+                break
+    if category in [None, '']:
+        category = 'kqa_pro'
+
+    record = _merge_extra_fields(
+        dict(context=f'Question: {str(question).strip()}\nAnswer:',
+             target='; '.join(answers) if answers else '',
+             answer_aliases=_extract_answer_aliases(item),
+             category=category,
+             dataset='kqa_pro',
+             qid=item.get('qid', item.get('id', None))),
+        item,
+        excluded_keys={
+            'question', 'Question', 'answer', 'answers', 'answer_aliases',
+            'category'
+        })
+    if tokenizer is not None and config is not None and _kg_enabled(config):
+        record['sg'] = _build_kqapro_sg(item, record['context'], tokenizer,
+                                        config)
     return record
 
 
@@ -746,6 +1151,199 @@ def load_complexwebquestions_llm_dataset(config, tokenizer):
         test_records = [item for item in test_records if item is not None]
     else:
         test_records = []
+
+    return (_build_llm_dataset(train_records, tokenizer),
+            _build_llm_dataset(val_records, tokenizer),
+            _build_llm_dataset(test_records, tokenizer))
+
+
+def _infer_split_name(path, default_split='train'):
+    lower_name = os.path.basename(path).lower()
+    if 'test' in lower_name:
+        return 'test'
+    if 'dev' in lower_name or 'valid' in lower_name or 'val' in lower_name:
+        return 'validation'
+    return default_split
+
+
+def _load_json_records(path):
+    raw = _read_json(path)
+    if isinstance(raw, dict):
+        raw = raw.get('questions', raw.get('Questions', raw.get('data', [])))
+    return raw if isinstance(raw, list) else []
+
+
+def load_grailqa_llm_dataset(config, tokenizer):
+    args = _cfg_data_args(config)
+    root = config.data.root
+    _maybe_download_files(root, args)
+    _maybe_download_archive(root, args)
+
+    train_path = _first_existing(root, [
+        args.get('train_file', None),
+        'GrailQA_v1.0/grailqa_v1.0_train.json',
+        'grailqa/grailqa_v1.0_train.json',
+        'grailqa_v1.0_train.json',
+        'train.json',
+    ])
+    val_path = _first_existing(root, [
+        args.get('val_file', None),
+        args.get('dev_file', None),
+        'GrailQA_v1.0/grailqa_v1.0_dev.json',
+        'grailqa/grailqa_v1.0_dev.json',
+        'grailqa_v1.0_dev.json',
+        'dev.json',
+        'valid.json',
+        'val.json',
+    ])
+    test_path = _first_existing(root, [
+        args.get('test_file', None),
+        'GrailQA_v1.0/grailqa_v1.0_test_public.json',
+        'grailqa/grailqa_v1.0_test_public.json',
+        'grailqa_v1.0_test_public.json',
+        'test.json',
+    ])
+
+    if train_path is None:
+        raise FileNotFoundError('Cannot find GrailQA train file.')
+
+    def _load_split(path, split_name=None):
+        split_name = split_name or _infer_split_name(path)
+        records = [
+            _format_grailqa_item(item, tokenizer, config, split_name)
+            for item in _load_json_records(path)
+        ]
+        return [item for item in records if item is not None]
+
+    train_records = _load_split(train_path, 'train')
+    if val_path is not None:
+        val_records = _load_split(val_path, 'validation')
+    else:
+        total_ratio = float(config.data.splits[0] + config.data.splits[1])
+        val_ratio = 0.0 if total_ratio <= 0 else \
+            float(config.data.splits[1]) / total_ratio
+        train_records, val_records = _train_val_split(train_records,
+                                                      val_ratio)
+    test_records = _load_split(test_path, 'test') if test_path is not None \
+        else []
+
+    return (_build_llm_dataset(train_records, tokenizer),
+            _build_llm_dataset(val_records, tokenizer),
+            _build_llm_dataset(test_records, tokenizer))
+
+
+def load_graphquestions_llm_dataset(config, tokenizer):
+    args = _cfg_data_args(config)
+    root = config.data.root
+    _maybe_download_files(root, args)
+    _maybe_download_archive(root, args)
+
+    train_path = _first_existing(root, [
+        args.get('train_file', None),
+        'GraphQuestions/graphquestions.training.json',
+        'graphquestions/graphquestions.training.json',
+        'graphquestions.training.json',
+        'train.json',
+    ])
+    val_path = _first_existing(root, [
+        args.get('val_file', None),
+        args.get('dev_file', None),
+        'GraphQuestions/graphquestions.validation.json',
+        'GraphQuestions/graphquestions.dev.json',
+        'graphquestions/graphquestions.validation.json',
+        'graphquestions/graphquestions.dev.json',
+        'valid.json',
+        'val.json',
+        'dev.json',
+    ])
+    test_path = _first_existing(root, [
+        args.get('test_file', None),
+        'GraphQuestions/graphquestions.testing.json',
+        'graphquestions/graphquestions.testing.json',
+        'graphquestions.testing.json',
+        'test.json',
+    ])
+
+    if train_path is None:
+        raise FileNotFoundError('Cannot find GraphQuestions train file.')
+
+    def _load_split(path, split_name=None):
+        split_name = split_name or _infer_split_name(path)
+        records = [
+            _format_graphquestions_item(item, tokenizer, config, split_name)
+            for item in _load_json_records(path)
+        ]
+        return [item for item in records if item is not None]
+
+    train_records = _load_split(train_path, 'train')
+    if val_path is not None:
+        val_records = _load_split(val_path, 'validation')
+    else:
+        total_ratio = float(config.data.splits[0] + config.data.splits[1])
+        val_ratio = 0.0 if total_ratio <= 0 else \
+            float(config.data.splits[1]) / total_ratio
+        train_records, val_records = _train_val_split(train_records,
+                                                      val_ratio)
+    test_records = _load_split(test_path, 'test') if test_path is not None \
+        else []
+
+    return (_build_llm_dataset(train_records, tokenizer),
+            _build_llm_dataset(val_records, tokenizer),
+            _build_llm_dataset(test_records, tokenizer))
+
+
+def load_kqapro_llm_dataset(config, tokenizer):
+    args = _cfg_data_args(config)
+    root = config.data.root
+    _maybe_download_files(root, args)
+    _maybe_download_archive(root, args)
+
+    train_path = _first_existing(root, [
+        args.get('train_file', None),
+        'kqa_pro/train.json',
+        'KQA-Pro/train.json',
+        'train.json',
+    ])
+    val_path = _first_existing(root, [
+        args.get('val_file', None),
+        args.get('dev_file', None),
+        'kqa_pro/val.json',
+        'kqa_pro/dev.json',
+        'KQA-Pro/val.json',
+        'KQA-Pro/dev.json',
+        'valid.json',
+        'val.json',
+        'dev.json',
+    ])
+    test_path = _first_existing(root, [
+        args.get('test_file', None),
+        'kqa_pro/test.json',
+        'KQA-Pro/test.json',
+        'test.json',
+    ])
+
+    if train_path is None:
+        raise FileNotFoundError('Cannot find KQA-Pro train file.')
+
+    def _load_split(path, split_name=None):
+        split_name = split_name or _infer_split_name(path)
+        records = [
+            _format_kqapro_item(item, tokenizer, config, split_name)
+            for item in _load_json_records(path)
+        ]
+        return [item for item in records if item is not None]
+
+    train_records = _load_split(train_path, 'train')
+    if val_path is not None:
+        val_records = _load_split(val_path, 'validation')
+    else:
+        total_ratio = float(config.data.splits[0] + config.data.splits[1])
+        val_ratio = 0.0 if total_ratio <= 0 else \
+            float(config.data.splits[1]) / total_ratio
+        train_records, val_records = _train_val_split(train_records,
+                                                      val_ratio)
+    test_records = _load_split(test_path, 'test') if test_path is not None \
+        else []
 
     return (_build_llm_dataset(train_records, tokenizer),
             _build_llm_dataset(val_records, tokenizer),

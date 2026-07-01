@@ -21,8 +21,12 @@ from federatedscope.llm.dataloader.task_datasets import (
     _cfg_data_args,
     _first_existing,
     _format_cwq_item,
+    _format_grailqa_item,
+    _format_graphquestions_item,
+    _format_kqapro_item,
     _format_webqsp_item,
     _read_json,
+    _train_val_split,
 )
 
 transformers.logging.set_verbosity(40)
@@ -30,10 +34,13 @@ transformers.logging.set_verbosity(40)
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Evaluate WebQSP/CWQ generated answers with hit@1.')
+        description='Evaluate KGQA generated answers with hit@1.')
     parser.add_argument('--cfg', required=True, help='Path to YAML config.')
     parser.add_argument('--dataset',
-                        choices=['webqsp', 'cwq'],
+                        choices=[
+                            'webqsp', 'cwq', 'grailqa', 'kqa_pro', 'kqapro',
+                            'graphquestions'
+                        ],
                         default=None,
                         help='Override dataset type inferred from cfg.')
     parser.add_argument('--split',
@@ -145,11 +152,24 @@ def _apply_eval_defaults(args, cfg):
 
 def _infer_dataset_name(cfg, override):
     if override:
-        return override
+        return 'kqa_pro' if override == 'kqapro' else override
     data_type = str(cfg.data.type).lower()
     if 'cwq' in data_type or 'complexwebquestions' in data_type:
         return 'cwq'
+    if 'grailqa' in data_type:
+        return 'grailqa'
+    if 'kqa_pro' in data_type or 'kqapro' in data_type:
+        return 'kqa_pro'
+    if 'graphquestions' in data_type:
+        return 'graphquestions'
     return 'webqsp'
+
+
+def _json_records(path):
+    raw = _read_json(path)
+    if isinstance(raw, dict):
+        raw = raw.get('questions', raw.get('Questions', raw.get('data', [])))
+    return raw if isinstance(raw, list) else []
 
 
 def _load_records(cfg, dataset_name, split, tokenizer):
@@ -172,7 +192,7 @@ def _load_records(cfg, dataset_name, split, tokenizer):
             _format_webqsp_item(item, tokenizer=tokenizer, config=cfg)
             for item in questions
         ]
-    else:
+    elif dataset_name == 'cwq':
         path = _first_existing(root, [
             args.get(f'{split}_file', None),
             args.get('test_file' if split == 'test' else 'val_file', None),
@@ -193,6 +213,104 @@ def _load_records(cfg, dataset_name, split, tokenizer):
                              split_name=split_name)
             for item in raw
         ] if isinstance(raw, list) else []
+    elif dataset_name == 'grailqa':
+        path = _first_existing(root, [
+            args.get(f'{split}_file', None),
+            args.get('test_file' if split == 'test' else 'val_file', None),
+            args.get('dev_file', None) if split == 'val' else None,
+            'GrailQA_v1.0/grailqa_v1.0_test_public.json'
+            if split == 'test' else None,
+            'GrailQA_v1.0/grailqa_v1.0_dev.json'
+            if split == 'val' else None,
+            'grailqa/grailqa_v1.0_test_public.json'
+            if split == 'test' else None,
+            'grailqa/grailqa_v1.0_dev.json' if split == 'val' else None,
+        ])
+        if path is None:
+            raise FileNotFoundError(f'Cannot find GrailQA {split} file.')
+        split_name = 'test' if split == 'test' else 'validation'
+        records = [
+            _format_grailqa_item(item, tokenizer=tokenizer, config=cfg,
+                                 split_name=split_name)
+            for item in _json_records(path)
+        ]
+    elif dataset_name == 'kqa_pro':
+        path = _first_existing(root, [
+            args.get(f'{split}_file', None),
+            args.get('test_file' if split == 'test' else 'val_file', None),
+            args.get('dev_file', None) if split == 'val' else None,
+            'kqa_pro/test.json' if split == 'test' else None,
+            'kqa_pro/val.json' if split == 'val' else None,
+            'kqa_pro/dev.json' if split == 'val' else None,
+            'KQA-Pro/test.json' if split == 'test' else None,
+            'KQA-Pro/val.json' if split == 'val' else None,
+            'KQA-Pro/dev.json' if split == 'val' else None,
+        ])
+        if path is None:
+            raise FileNotFoundError(f'Cannot find KQA-Pro {split} file.')
+        split_name = 'test' if split == 'test' else 'validation'
+        records = [
+            _format_kqapro_item(item, tokenizer=tokenizer, config=cfg,
+                                split_name=split_name)
+            for item in _json_records(path)
+        ]
+    elif dataset_name == 'graphquestions':
+        path = _first_existing(root, [
+            args.get(f'{split}_file', None),
+            args.get('test_file' if split == 'test' else 'val_file', None),
+            args.get('dev_file', None) if split == 'val' else None,
+            'GraphQuestions/graphquestions.testing.json'
+            if split == 'test' else None,
+            'GraphQuestions/graphquestions.validation.json'
+            if split == 'val' else None,
+            'GraphQuestions/graphquestions.dev.json'
+            if split == 'val' else None,
+            'graphquestions/graphquestions.testing.json'
+            if split == 'test' else None,
+            'graphquestions/graphquestions.validation.json'
+            if split == 'val' else None,
+            'graphquestions/graphquestions.dev.json' if split == 'val' else None,
+        ])
+        if path is None and split == 'val':
+            train_path = _first_existing(root, [
+                args.get('train_file', None),
+                'GraphQuestions/graphquestions.training.json',
+                'graphquestions/graphquestions.training.json',
+                'graphquestions.training.json',
+            ])
+            if train_path is None:
+                raise FileNotFoundError(
+                    'Cannot find GraphQuestions train file to derive val split.'
+                )
+            train_records = [
+                _format_graphquestions_item(item,
+                                            tokenizer=tokenizer,
+                                            config=cfg,
+                                            split_name='train')
+                for item in _json_records(train_path)
+            ]
+            train_records = [
+                record for record in train_records if record is not None
+            ]
+            total_ratio = float(cfg.data.splits[0] + cfg.data.splits[1])
+            val_ratio = 0.0 if total_ratio <= 0 else \
+                float(cfg.data.splits[1]) / total_ratio
+            _, records = _train_val_split(train_records, val_ratio)
+            path = f'{train_path}#derived-val'
+        elif path is None:
+            raise FileNotFoundError(
+                f'Cannot find GraphQuestions {split} file.')
+        else:
+            split_name = 'test' if split == 'test' else 'validation'
+            records = [
+                _format_graphquestions_item(item,
+                                            tokenizer=tokenizer,
+                                            config=cfg,
+                                            split_name=split_name)
+                for item in _json_records(path)
+            ]
+    elif dataset_name == 'cwq':
+        raise ValueError(f'Unsupported KGQA dataset {dataset_name}.')
 
     records = [record for record in records if record is not None]
     return path, records
@@ -248,7 +366,10 @@ def _answers_from_raw_record(record):
     if isinstance(raw_answers, list):
         for raw_answer in raw_answers:
             if isinstance(raw_answer, dict):
-                for key in ['answer', 'entity_name', 'name', 'label']:
+                for key in [
+                        'answer', 'entity_name', 'answer_argument', 'name',
+                        'label'
+                ]:
                     value = raw_answer.get(key, None)
                     if value not in [None, '']:
                         answers.append(str(value).strip())

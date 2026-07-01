@@ -144,3 +144,6 @@ dmypy.json
 # No new scripts 
 /scripts_*data/CWQ/web_snippets_test.json.zip
 data/CWQ/web_snippets_dev.json.zip
+/data/GrailQA_v1.0/
+/data/kqa_pro/
+/data/GraphQuestions/

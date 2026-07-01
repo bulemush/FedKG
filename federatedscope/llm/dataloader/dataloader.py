@@ -16,7 +16,9 @@ from federatedscope.llm.dataset.llm_dataset import DefaultToken, \
     LLMDataset, PROMPT_DICT
 from federatedscope.core.data.utils import download_url
 from federatedscope.llm.dataloader.task_datasets import \
-    load_complexwebquestions_llm_dataset, load_webquestionssp_llm_dataset
+    load_complexwebquestions_llm_dataset, load_grailqa_llm_dataset, \
+    load_graphquestions_llm_dataset, load_kqapro_llm_dataset, \
+    load_webquestionssp_llm_dataset
 from federatedscope.llm.kg_adapter.data_utils import build_kg_batch
 from federatedscope.llm.model.model_builder import get_llm
 
@@ -428,6 +430,15 @@ def load_llm_dataset(config=None, **kwargs):
 
     elif dataset_name.lower() in ['complexwebquestions', 'cwq']:
         dataset = load_complexwebquestions_llm_dataset(config, tokenizer)
+
+    elif dataset_name.lower() == 'grailqa':
+        dataset = load_grailqa_llm_dataset(config, tokenizer)
+
+    elif dataset_name.lower() in ['kqa_pro', 'kqapro']:
+        dataset = load_kqapro_llm_dataset(config, tokenizer)
+
+    elif dataset_name.lower() == 'graphquestions':
+        dataset = load_graphquestions_llm_dataset(config, tokenizer)
 
     elif dataset_name.lower() in ['openbookqa_conceptnet',
                                   'openbookqa_mcqa_kg']:
