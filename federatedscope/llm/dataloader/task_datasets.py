@@ -231,16 +231,26 @@ def _strip_ns_token(token):
     token = str(token).strip()
     if token.startswith('ns:'):
         return token[3:]
+    if token.startswith(':'):
+        return token[1:]
+    if token.startswith('<http://rdf.freebase.com/ns/') and token.endswith('>'):
+        return token[len('<http://rdf.freebase.com/ns/'):-1]
     return token
 
 
 def _parse_sparql_triples(sparql):
     if sparql in [None, '']:
         return []
+    entity_token = (
+        r'(?:ns:[^\s\{\}\(\)]+|:[^\s\{\}\(\)]+|'
+        r'<http://rdf\.freebase\.com/ns/[^>\s]+>|\?[A-Za-z_][\w]*)')
+    relation_token = (
+        r'(?:ns:[^\s\{\}\(\)]+|:[^\s\{\}\(\)]+|'
+        r'<http://rdf\.freebase\.com/ns/[^>\s]+>)')
     triple_pattern = re.compile(
-        r'(?P<src>(?:ns:[^\s]+|\?[A-Za-z_][\w]*))\s+'
-        r'(?P<rel>ns:[^\s]+)\s+'
-        r'(?P<dst>(?:ns:[^\s]+|\?[A-Za-z_][\w]*))\s+\.')
+        rf'(?P<src>{entity_token})\s+'
+        rf'(?P<rel>{relation_token})\s+'
+        rf'(?P<dst>{entity_token})\s+\.')
     triples = []
     for match in triple_pattern.finditer(str(sparql)):
         src = _strip_ns_token(match.group('src'))
@@ -248,6 +258,94 @@ def _parse_sparql_triples(sparql):
         dst = _strip_ns_token(match.group('dst'))
         triples.append((src, rel, dst))
     return triples
+
+
+def _sparql_from_item(item):
+    return item.get('sparql_query',
+                    item.get('sparql', item.get('Sparql', '')))
+
+
+def _answer_node_text_map(item):
+    answer_nodes = {}
+    raw_answers = item.get('answers', item.get('answer', []))
+    if not isinstance(raw_answers, list):
+        raw_answers = [raw_answers]
+    for answer in raw_answers:
+        if isinstance(answer, dict):
+            answer_id = answer.get('answer_id',
+                                   answer.get('answer_argument',
+                                              answer.get('id', None)))
+            answer_text = answer.get('answer',
+                                     answer.get('entity_name',
+                                                answer.get('name',
+                                                           answer_id)))
+            if answer_id not in [None, '']:
+                answer_nodes[str(answer_id)] = str(answer_text)
+        elif answer not in [None, '']:
+            answer_nodes[str(answer)] = str(answer)
+    return answer_nodes
+
+
+def _build_sparql_sg(item, context_text, tokenizer, config):
+    triples = _parse_sparql_triples(_sparql_from_item(item))
+    if not triples:
+        return None
+
+    entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
+    answer_nodes = _answer_node_text_map(item)
+    node_specs = []
+    node_index = {}
+
+    def ensure_node(node_key):
+        if node_key in node_index:
+            return node_index[node_key]
+        if str(node_key).startswith('?'):
+            node_text = f'variable {str(node_key)[1:]}'
+            mention = ''
+            node_type = 2
+        else:
+            node_text = answer_nodes.get(str(node_key), str(node_key))
+            mention = node_text if node_text in context_text else ''
+            node_type = 3 if str(node_key) in answer_nodes else 1
+        node_index[node_key] = len(node_specs)
+        node_specs.append({
+            'key': node_key,
+            'text': node_text,
+            'mention': mention,
+            'type': node_type,
+        })
+        return node_index[node_key]
+
+    edges = []
+    for src, rel, dst in triples:
+        src_idx = ensure_node(src)
+        dst_idx = ensure_node(dst)
+        edges.append((src_idx, dst_idx, rel))
+
+    node_ids = [_stable_vocab_id(node['key'], entity_vocab_size)
+                for node in node_specs]
+    node_type = [node['type'] for node in node_specs]
+    edge_index = [
+        [src for src, _, _ in edges],
+        [dst for _, dst, _ in edges],
+    ] if edges else [[], []]
+    edge_type = [_stable_relation_id(rel, config) for _, _, rel in edges]
+    nid2swid = [_encode_text_ids(tokenizer, node['text']) for node in node_specs]
+    eid2swid = [_encode_text_ids(tokenizer, rel) for _, _, rel in edges]
+    align_mask = _build_align_mask(tokenizer,
+                                   context_text,
+                                   [node['mention'] for node in node_specs])
+
+    return {
+        'node_ids': node_ids,
+        'node_type': node_type,
+        'edge_index': edge_index,
+        'edge_type': edge_type,
+        'nid2swid': nid2swid,
+        'eid2swid': eid2swid,
+        'align_mask': align_mask,
+        'token_entity_ids': _build_token_entity_ids_from_align(align_mask),
+    }
 
 
 def _extract_cwq_answers(item):
@@ -299,56 +397,22 @@ def _extract_cwq_answer_aliases(item):
 
 
 def _build_cwq_sg(item, context_text, tokenizer, config):
-    sparql = item.get('sparql', item.get('Sparql', ''))
-    triples = _parse_sparql_triples(sparql)
+    sg = _build_sparql_sg(item, context_text, tokenizer, config)
+    if sg is not None:
+        return sg
+
     entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
-    edge_vocab_size = _kg_vocab_size(config, 'edge_vocab_size', 50000)
-    answer_nodes = {}
-    for answer in item.get('answers', []):
-        if isinstance(answer, dict) and answer.get('answer_id', None):
-            answer_nodes[str(answer['answer_id'])] = answer.get(
-                'answer', answer['answer_id'])
-
-    node_specs = []
-    node_index = {}
-
-    def ensure_node(node_key):
-        if node_key in node_index:
-            return node_index[node_key]
-        if node_key.startswith('?'):
-            node_text = f'variable {node_key[1:]}'
-            mention = ''
-            node_type = 2
-        else:
-            node_text = answer_nodes.get(node_key, node_key)
-            mention = node_text if node_text in context_text else ''
-            node_type = 3 if node_key in answer_nodes else 1
-        node_index[node_key] = len(node_specs)
-        node_specs.append({
-            'key': node_key,
-            'text': node_text,
-            'mention': mention,
-            'type': node_type,
-        })
-        return node_index[node_key]
-
+    question = item.get('question',
+                        item.get('machine_question',
+                                 item.get('webqsp_question',
+                                          'complex question')))
+    node_specs = [{
+        'key': f'question::{question}',
+        'text': str(question),
+        'mention': str(question),
+        'type': 1,
+    }]
     edges = []
-    for src, rel, dst in triples:
-        src_idx = ensure_node(src)
-        dst_idx = ensure_node(dst)
-        edges.append((src_idx, dst_idx, rel))
-
-    if len(node_specs) == 0:
-        question = item.get('question',
-                            item.get('machine_question',
-                                     item.get('webqsp_question',
-                                              'complex question')))
-        node_specs.append({
-            'key': f'question::{question}',
-            'text': str(question),
-            'mention': str(question),
-            'type': 1,
-        })
 
     node_ids = [_stable_vocab_id(node['key'], entity_vocab_size)
                 for node in node_specs]
@@ -529,6 +593,11 @@ def _build_graph_query_sg(item, context_text, tokenizer, config):
         'align_mask': align_mask,
         'token_entity_ids': _build_token_entity_ids_from_align(align_mask),
     }
+
+
+def _build_query_sg(item, context_text, tokenizer, config):
+    return _build_sparql_sg(item, context_text, tokenizer, config) or \
+        _build_graph_query_sg(item, context_text, tokenizer, config)
 
 
 def _strip_angle_token(token):
@@ -882,8 +951,8 @@ def _format_grailqa_item(item, tokenizer=None, config=None, split_name=None):
             'category'
         })
     if tokenizer is not None and config is not None and _kg_enabled(config):
-        record['sg'] = _build_graph_query_sg(item, record['context'],
-                                             tokenizer, config)
+        record['sg'] = _build_query_sg(item, record['context'], tokenizer,
+                                       config)
     return record
 
 
@@ -913,8 +982,8 @@ def _format_graphquestions_item(item,
             'category'
         })
     if tokenizer is not None and config is not None and _kg_enabled(config):
-        record['sg'] = _build_graph_query_sg(item, record['context'],
-                                             tokenizer, config)
+        record['sg'] = _build_query_sg(item, record['context'], tokenizer,
+                                       config)
     return record
 
 

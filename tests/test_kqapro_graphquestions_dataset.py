@@ -107,6 +107,46 @@ def test_graphquestions_formatter_builds_graph_query_sg():
     assert len(record['sg']['edge_type']) == 1
 
 
+def test_graphquestions_formatter_prefers_sparql_query_sg():
+    task_datasets = _load_task_datasets()
+    item = {
+        'qid': 1,
+        'question': 'find terrorist organizations involved in september 11 attacks.',
+        'answer': ['al-Qaeda'],
+        'function': 'none',
+        'graph_query': {
+            'nodes': [{
+                'nid': idx,
+                'node_type': 'entity',
+                'id': f'unrelated.entity.{idx}',
+                'friendly_name': f'unrelated entity {idx}',
+            } for idx in range(20)],
+            'edges': [{
+                'start': idx,
+                'end': idx + 1,
+                'relation': f'unrelated.relation.{idx}',
+            } for idx in range(19)],
+        },
+        'sparql_query':
+        'PREFIX : <http://rdf.freebase.com/ns/> '
+        'SELECT (?x0 AS ?value) WHERE { '
+        '?x0 :type.object.type :base.terrorism.terrorist_organization . '
+        'VALUES ?x1 { :en.september_11_2001_attacks } '
+        '?x0 :base.terrorism.terrorist_organization.involved_in_attacks ?x1 . '
+        '}',
+    }
+
+    record = task_datasets._format_graphquestions_item(
+        item,
+        tokenizer=DummyTokenizer(),
+        config=_cfg(),
+        split_name='train')
+
+    assert len(record['sg']['node_ids']) == 3
+    assert len(record['sg']['edge_type']) == 2
+    assert record['sg']['edge_index'] == [[0, 0], [1, 2]]
+
+
 def test_kqapro_formatter_uses_sparql_or_program_sg():
     task_datasets = _load_task_datasets()
     item = {
