@@ -18,7 +18,8 @@ data:
   args: [ {
     'train_file': 'GrailQA_v1.0/grailqa_v1.0_train.json',
     'val_file': 'GrailQA_v1.0/grailqa_v1.0_dev.json',
-    'test_file': 'GrailQA_v1.0/grailqa_v1.0_test_public.json'
+    'test_file': 'GrailQA_v1.0/grailqa_v1.0_test_public.json',
+    'max_answers_per_sample': 16
   } ]
 llm:
   grad_accum_step: 2

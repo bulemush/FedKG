@@ -17,7 +17,8 @@ data:
   splitter: 'iid'
   args: [ {
     'train_file': 'GraphQuestions/graphquestions.training.json',
-    'test_file': 'GraphQuestions/graphquestions.testing.json'
+    'test_file': 'GraphQuestions/graphquestions.testing.json',
+    'max_answers_per_sample': 16
   } ]
 llm:
   grad_accum_step: 2

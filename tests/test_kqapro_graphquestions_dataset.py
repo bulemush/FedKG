@@ -51,8 +51,12 @@ class DummyTokenizer:
         return {'input_ids': ids or [self.pad_token_id]}
 
 
-def _cfg(use_graph_query_fallback=False):
+def _cfg(use_graph_query_fallback=False, max_answers_per_sample=None):
+    data_args = {}
+    if max_answers_per_sample is not None:
+        data_args['max_answers_per_sample'] = max_answers_per_sample
     return SimpleNamespace(
+        data=SimpleNamespace(args=[data_args]),
         llm=SimpleNamespace(
             kg_adapter=SimpleNamespace(
                 use=True,
@@ -177,6 +181,43 @@ def test_graphquestions_formatter_uses_minimal_sg_without_sparql_by_default():
 
     assert len(record['sg']['node_ids']) == 1
     assert record['sg']['edge_index'] == [[], []]
+
+
+def test_graphquestions_formatter_limits_multi_answer_target():
+    task_datasets = _load_task_datasets()
+    item = {
+        'qid': 1,
+        'question': 'list matching entities.',
+        'answer': [{
+            'answer_argument': 'm.a0',
+            'entity_name': 'a0',
+        }, {
+            'answer_argument': 'm.a1',
+            'entity_name': 'a1',
+        }, {
+            'answer_argument': 'm.a2',
+            'entity_name': 'a2',
+        }, {
+            'answer_argument': 'm.a3',
+            'entity_name': 'a3',
+        }],
+        'sparql_query':
+        'PREFIX : <http://rdf.freebase.com/ns/> '
+        'SELECT (?x0 AS ?value) WHERE { '
+        '?x0 :type.object.type :some.class . '
+        '}',
+    }
+
+    record = task_datasets._format_graphquestions_item(
+        item,
+        tokenizer=DummyTokenizer(),
+        config=_cfg(max_answers_per_sample=2),
+        split_name='train')
+
+    assert record['target'] == 'a0; a1'
+    assert record['answer_aliases'] == [
+        'm.a0', 'a0', 'm.a1', 'a1', 'm.a2', 'a2', 'm.a3', 'a3'
+    ]
 
 
 def test_kqapro_formatter_uses_sparql_or_program_sg():

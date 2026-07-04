@@ -454,6 +454,28 @@ def _dedup_keep_order(values):
     return deduped
 
 
+def _get_data_arg(config, key, default=None):
+    try:
+        if hasattr(config.data, 'args') and len(config.data.args) > 0:
+            return config.data.args[0].get(key, default)
+    except Exception:
+        pass
+    return default
+
+
+def _limit_target_answers(answers, config):
+    max_answers = _get_data_arg(config, 'max_answers_per_sample', None)
+    if max_answers in [None, '', 0]:
+        return answers
+    try:
+        max_answers = int(max_answers)
+    except Exception:
+        return answers
+    if max_answers <= 0:
+        return answers
+    return answers[:max_answers]
+
+
 def _extract_named_answers(item):
     raw_answers = item.get('answers', item.get('answer', []))
     if raw_answers in [None, '']:
@@ -907,7 +929,8 @@ def _format_cwq_item(item, tokenizer=None, config=None, split_name=None):
     split_flag = str(item.get('split', split_name or '')).lower()
     if not answers and split_flag != 'test':
         return None
-    target = '; '.join(answers) if answers else ''
+    target_answers = _limit_target_answers(answers, config)
+    target = '; '.join(target_answers) if target_answers else ''
     answer_aliases = _extract_cwq_answer_aliases(item)
     record = _merge_extra_fields(
         dict(context=f'Question: {str(question).strip()}\nAnswer:',
@@ -935,7 +958,8 @@ def _format_grailqa_item(item, tokenizer=None, config=None, split_name=None):
     if not answers and split_flag not in ['test', 'public_test']:
         return None
 
-    target = '; '.join(answers) if answers else ''
+    target_answers = _limit_target_answers(answers, config)
+    target = '; '.join(target_answers) if target_answers else ''
     answer_aliases = _extract_answer_aliases(item)
     category = item.get('level',
                         item.get('function',
@@ -974,7 +998,8 @@ def _format_graphquestions_item(item,
 
     record = _merge_extra_fields(
         dict(context=f'Question: {str(question).strip()}\nAnswer:',
-             target='; '.join(answers) if answers else '',
+             target='; '.join(_limit_target_answers(answers, config))
+             if answers else '',
              answer_aliases=_extract_answer_aliases(item),
              category=item.get('function',
                                item.get('category', 'graphquestions')),
@@ -1012,7 +1037,8 @@ def _format_kqapro_item(item, tokenizer=None, config=None, split_name=None):
 
     record = _merge_extra_fields(
         dict(context=f'Question: {str(question).strip()}\nAnswer:',
-             target='; '.join(answers) if answers else '',
+             target='; '.join(_limit_target_answers(answers, config))
+             if answers else '',
              answer_aliases=_extract_answer_aliases(item),
              category=category,
              dataset='kqa_pro',
