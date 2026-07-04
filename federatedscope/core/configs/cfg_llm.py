@@ -90,6 +90,10 @@ def extend_llm_cfg(cfg):
     cfg.llm.kg_adapter.use_trips = True
     cfg.llm.kg_adapter.use_joint_reasoning = True
     cfg.llm.kg_adapter.layer_indices = []
+    # For KGQA datasets that provide both SPARQL and graph_query, prefer the
+    # compact SPARQL query graph. Keep graph_query fallback opt-in because raw
+    # graph_query can be much larger than CWQ/KQA-Pro style logical graphs.
+    cfg.llm.kg_adapter.use_graph_query_fallback = False
     # If > 0, only inject into the last N adapter-side transformer blocks.
     cfg.llm.kg_adapter.adapter_last_n = 0
 

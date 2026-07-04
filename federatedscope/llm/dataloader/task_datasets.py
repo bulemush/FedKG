@@ -348,6 +348,37 @@ def _build_sparql_sg(item, context_text, tokenizer, config):
     }
 
 
+def _build_question_sg(item, context_text, tokenizer, config):
+    question = item.get('question',
+                        item.get('Question',
+                                 item.get('machine_question',
+                                          item.get('webqsp_question',
+                                                   'question'))))
+    entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
+    node_specs = [{
+        'key': f'question::{question}',
+        'text': str(question),
+        'mention': str(question),
+        'type': 1,
+    }]
+    node_ids = [_stable_vocab_id(node['key'], entity_vocab_size)
+                for node in node_specs]
+    align_mask = _build_align_mask(tokenizer,
+                                   context_text,
+                                   [node['mention'] for node in node_specs])
+    return {
+        'node_ids': node_ids,
+        'node_type': [node['type'] for node in node_specs],
+        'edge_index': [[], []],
+        'edge_type': [],
+        'nid2swid': [_encode_text_ids(tokenizer, node['text'])
+                     for node in node_specs],
+        'eid2swid': [],
+        'align_mask': align_mask,
+        'token_entity_ids': _build_token_entity_ids_from_align(align_mask),
+    }
+
+
 def _extract_cwq_answers(item):
     raw_answers = item.get('answers', item.get('answer', []))
     answers = []
@@ -400,44 +431,7 @@ def _build_cwq_sg(item, context_text, tokenizer, config):
     sg = _build_sparql_sg(item, context_text, tokenizer, config)
     if sg is not None:
         return sg
-
-    entity_vocab_size = _kg_vocab_size(config, 'entity_vocab_size', 50000)
-    question = item.get('question',
-                        item.get('machine_question',
-                                 item.get('webqsp_question',
-                                          'complex question')))
-    node_specs = [{
-        'key': f'question::{question}',
-        'text': str(question),
-        'mention': str(question),
-        'type': 1,
-    }]
-    edges = []
-
-    node_ids = [_stable_vocab_id(node['key'], entity_vocab_size)
-                for node in node_specs]
-    node_type = [node['type'] for node in node_specs]
-    edge_index = [
-        [src for src, _, _ in edges],
-        [dst for _, dst, _ in edges],
-    ] if edges else [[], []]
-    edge_type = [_stable_relation_id(rel, config) for _, _, rel in edges]
-    nid2swid = [_encode_text_ids(tokenizer, node['text']) for node in node_specs]
-    eid2swid = [_encode_text_ids(tokenizer, rel) for _, _, rel in edges]
-    align_mask = _build_align_mask(tokenizer,
-                                   context_text,
-                                   [node['mention'] for node in node_specs])
-
-    return {
-        'node_ids': node_ids,
-        'node_type': node_type,
-        'edge_index': edge_index,
-        'edge_type': edge_type,
-        'nid2swid': nid2swid,
-        'eid2swid': eid2swid,
-        'align_mask': align_mask,
-        'token_entity_ids': _build_token_entity_ids_from_align(align_mask),
-    }
+    return _build_question_sg(item, context_text, tokenizer, config)
 
 
 _NODE_TYPE_IDS = {
@@ -596,8 +590,18 @@ def _build_graph_query_sg(item, context_text, tokenizer, config):
 
 
 def _build_query_sg(item, context_text, tokenizer, config):
-    return _build_sparql_sg(item, context_text, tokenizer, config) or \
-        _build_graph_query_sg(item, context_text, tokenizer, config)
+    sg = _build_sparql_sg(item, context_text, tokenizer, config)
+    if sg is not None:
+        return sg
+    try:
+        use_graph_query = bool(getattr(config.llm.kg_adapter,
+                                       'use_graph_query_fallback',
+                                       False))
+    except Exception:
+        use_graph_query = False
+    if use_graph_query:
+        return _build_graph_query_sg(item, context_text, tokenizer, config)
+    return _build_question_sg(item, context_text, tokenizer, config)
 
 
 def _strip_angle_token(token):

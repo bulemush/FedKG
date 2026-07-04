@@ -62,6 +62,7 @@ def _cfg(root='data/'):
                 num_relations=4096,
                 max_node_num_per_batch=2500,
                 use_trips=True,
+                use_graph_query_fallback=True,
             ),
         ),
     )

@@ -51,7 +51,7 @@ class DummyTokenizer:
         return {'input_ids': ids or [self.pad_token_id]}
 
 
-def _cfg():
+def _cfg(use_graph_query_fallback=False):
     return SimpleNamespace(
         llm=SimpleNamespace(
             kg_adapter=SimpleNamespace(
@@ -62,6 +62,7 @@ def _cfg():
                 num_relations=4096,
                 max_node_num_per_batch=2500,
                 use_trips=True,
+                use_graph_query_fallback=use_graph_query_fallback,
             ), ), )
 
 
@@ -98,7 +99,7 @@ def test_graphquestions_formatter_builds_graph_query_sg():
     record = task_datasets._format_graphquestions_item(
         item,
         tokenizer=DummyTokenizer(),
-        config=_cfg(),
+        config=_cfg(use_graph_query_fallback=True),
         split_name='train')
 
     assert record['target'] == 'al-Qaeda'
@@ -145,6 +146,37 @@ def test_graphquestions_formatter_prefers_sparql_query_sg():
     assert len(record['sg']['node_ids']) == 3
     assert len(record['sg']['edge_type']) == 2
     assert record['sg']['edge_index'] == [[0, 0], [1, 2]]
+
+
+def test_graphquestions_formatter_uses_minimal_sg_without_sparql_by_default():
+    task_datasets = _load_task_datasets()
+    item = {
+        'qid': 1,
+        'question': 'find terrorist organizations involved in september 11 attacks.',
+        'answer': ['al-Qaeda'],
+        'graph_query': {
+            'nodes': [{
+                'nid': idx,
+                'node_type': 'entity',
+                'id': f'unrelated.entity.{idx}',
+                'friendly_name': f'unrelated entity {idx}',
+            } for idx in range(20)],
+            'edges': [{
+                'start': idx,
+                'end': idx + 1,
+                'relation': f'unrelated.relation.{idx}',
+            } for idx in range(19)],
+        },
+    }
+
+    record = task_datasets._format_graphquestions_item(
+        item,
+        tokenizer=DummyTokenizer(),
+        config=_cfg(),
+        split_name='train')
+
+    assert len(record['sg']['node_ids']) == 1
+    assert record['sg']['edge_index'] == [[], []]
 
 
 def test_kqapro_formatter_uses_sparql_or_program_sg():
