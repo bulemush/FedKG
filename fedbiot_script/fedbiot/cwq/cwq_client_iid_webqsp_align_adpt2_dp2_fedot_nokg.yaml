@@ -6,7 +6,7 @@ federate:
   mode: standalone
   client_num: 3
   total_round_num: 200
-  save_to: "checkpoints/llama.cwq.webqsp.adpt2.dp2.fedbiot_nokg.ckpt"
+  save_to: "checkpoints/llama.cwq.webqsp.adpt2.dp2.fedot_nokg.ckpt"
   save_freq: 100
   share_local_model: True
   online_aggr: False
@@ -40,30 +40,6 @@ llm:
     emu_r: 30
     strategy: 'drop_layer'
     kwargs: [ { 'drop_ratio': 0.2 }]
-    emu_align:
-      use: True
-      initial_only: True
-      periodic: True
-      periodic_interval: 1
-      periodic_start_round: 0
-      periodic_save: False
-      sim_loss: 'l2'
-      layerwise_distill: False
-      kl_divergence: 'raw'
-      data:
-        root: data/
-        type: 'webquestionssp@llm'
-        splits: [0.9, 0.1, 0.0]
-        splitter: 'iid'
-        args: [ {
-          'train_file': 'WebQSP/data/WebQSP.train.json',
-          'test_file': 'WebQSP/data/WebQSP.test.json'
-        } ]
-      train:
-        local_update_steps: 5
-        initial_update_rounds: 50
-        lm_loss_weight: 0.0
-        kd_loss_weight: 0.9
 dataloader:
   batch_size: 1
 model:
@@ -89,4 +65,4 @@ eval:
     match_mode: 'contains'
   report: ['weighted_avg', 'avg', 'raw']
   count_flops: False
-expname: "fedbiot/llama-7b_cwq_webqsp_offsite_adpt2_dp2_nokg"
+expname: "fedot/llama-7b_cwq_webqsp_offsite_adpt2_dp2_nokg"

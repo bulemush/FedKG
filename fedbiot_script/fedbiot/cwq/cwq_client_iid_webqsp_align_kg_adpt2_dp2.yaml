@@ -106,7 +106,6 @@ eval:
   best_res_update_round_wise_key: 'val_loss'
   kgqa:
     split: 'val'
-    limit: 1000
     match_mode: 'contains'
     select_metric: 'hit@1'
   report: ['weighted_avg', 'avg', 'raw']

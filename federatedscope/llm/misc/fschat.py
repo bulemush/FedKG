@@ -2,7 +2,7 @@ import sys
 import logging
 import torch
 import transformers
-from transformers import pipeline, GenerationConfig
+from transformers import GenerationConfig
 import os
 import gc
 
