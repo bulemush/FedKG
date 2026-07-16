@@ -1,0 +1,51 @@
+use_gpu: True
+device: 0
+early_stop: {patience: 0}
+federate:
+  mode: standalone
+  client_num: 1
+  total_round_num: 200
+  save_to: "checkpoints/llama.kqapro.webqsp.adpt2.dp2.fedot_nokg.ckpt"
+  save_freq: 100
+  share_local_model: True
+  online_aggr: False
+data:
+  root: data/
+  type: 'kqa_pro@llm'
+  splits: [0.8, 0.1, 0.1]
+  splitter: 'iid'
+  args: [{'train_file': 'kqa_pro/train.json', 'val_file': 'kqa_pro/val.json', 'test_file': 'kqa_pro/test.json'}]
+llm:
+  grad_accum_step: 2
+  tok_len: 800
+  chat: {max_len: 300}
+  model_parallel: {use: True, device_map: 'balanced_layers', same_device_map: False}
+  adapter:
+    use: True
+    args: [{'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05}]
+  kg_adapter: {use: False}
+  offsite_tuning:
+    use: True
+    save_full_model: True
+    emu_l: 0
+    emu_r: 30
+    strategy: 'drop_layer'
+    kwargs: [{'drop_ratio': 0.2}]
+dataloader: {batch_size: 1}
+model:
+  type: '/home/async/data-disk/wgh/FedKG/federatedscope/llm/data/models/Llama-2-7b-hf@huggingface_llm'
+train:
+  local_update_steps: 30
+  batch_or_epoch: batch
+  optimizer: {type: AdamW, lr: 0.0001, betas: (0.9, 0.95)}
+  is_enable_half: True
+criterion: {type: CrossEntropyLoss}
+trainer: {type: llmtrainer}
+eval:
+  freq: 50
+  metrics: ['loss']
+  best_res_update_round_wise_key: 'val_loss'
+  kgqa: {split: 'test', match_mode: 'contains'}
+  report: ['weighted_avg', 'avg', 'raw']
+  count_flops: False
+expname: "central/llama-7b_kqapro_webqsp_offsite_tuning_dp2_nokg"
