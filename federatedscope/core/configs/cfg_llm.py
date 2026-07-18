@@ -86,6 +86,10 @@ def extend_llm_cfg(cfg):
     cfg.llm.kg_adapter.keep_ratio = 1.0
     cfg.llm.kg_adapter.max_node_num_per_batch = 2500
     cfg.llm.kg_adapter.use_edge_emb = True
+    # Ablation switches. Keep both enabled by default so existing experiment
+    # configs retain their original forward path.
+    cfg.llm.kg_adapter.use_hybrid_embedding = True
+    cfg.llm.kg_adapter.use_initial_graph_token_injection = True
     cfg.llm.kg_adapter.use_gnn = True
     cfg.llm.kg_adapter.use_trips = True
     cfg.llm.kg_adapter.use_joint_reasoning = True

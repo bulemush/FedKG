@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import re
+import statistics
 import string
 
 import torch
@@ -58,6 +59,24 @@ def parse_args():
     parser.add_argument('--summary',
                         default=None,
                         help='Summary csv path.')
+    parser.add_argument('--partition-manifest',
+                        default=None,
+                        help='Optional IID/non-IID partition manifest. When '
+                        'set, per-client and aggregate metrics are emitted.')
+    parser.add_argument('--partition-summary-json',
+                        default=None,
+                        help='Per-client JSON summary path. Defaults beside '
+                        '--summary.')
+    parser.add_argument('--checkpoint-distribution',
+                        choices=['iid', 'noniid', 'unknown'],
+                        default=None,
+                        help='Distribution used to train the checkpoint. By '
+                        'default this is inferred from the config.')
+    parser.add_argument('--allow-diagnostic-mismatch',
+                        action='store_true',
+                        help='Allow an IID checkpoint/non-IID manifest (or '
+                        'reverse) diagnostic. Such output is marked '
+                        'diagnostic_only and must not enter the paper table.')
     parser.add_argument('--limit',
                         type=int,
                         default=-1,
@@ -163,6 +182,96 @@ def _infer_dataset_name(cfg, override):
     if 'graphquestions' in data_type:
         return 'graphquestions'
     return 'webqsp'
+
+
+def _canonical_dataset_name(name):
+    return 'kqa_pro' if name in ['kqapro', 'kqa_pro'] else name
+
+
+def _load_manifest(path):
+    with open(path, encoding='utf-8') as fin:
+        manifest = json.load(fin)
+    if manifest.get('schema_version') != 1:
+        raise ValueError('Only partition manifest schema_version=1 is '
+                         'supported.')
+    return manifest
+
+
+def _configured_manifest_path(cfg):
+    if str(cfg.data.splitter) != 'partition_manifest':
+        return None
+    args = cfg.data.splitter_args[0] if cfg.data.splitter_args else {}
+    if isinstance(args, dict):
+        return args.get('manifest')
+    return getattr(args, 'manifest', None)
+
+
+def _infer_checkpoint_distribution(args, cfg):
+    if args.checkpoint_distribution is not None:
+        return args.checkpoint_distribution, 'command_line'
+    configured_manifest = _configured_manifest_path(cfg)
+    if configured_manifest and os.path.isfile(configured_manifest):
+        return _load_manifest(configured_manifest).get(
+            'partition_type', 'unknown'), 'config_manifest'
+    if str(cfg.data.splitter) == 'iid':
+        return 'iid', 'config_splitter'
+    return 'unknown', 'unresolved'
+
+
+def _partition_context(args, cfg, dataset_name, split_name, record_count):
+    if not args.partition_manifest:
+        return None
+    manifest = _load_manifest(args.partition_manifest)
+    manifest_dataset = _canonical_dataset_name(manifest.get('dataset', ''))
+    if manifest_dataset != _canonical_dataset_name(dataset_name):
+        raise ValueError(
+            f'Manifest dataset {manifest_dataset} does not match '
+            f'{dataset_name}.')
+    split = manifest.get('splits', {}).get(split_name)
+    if split is None:
+        raise ValueError(f'Manifest has no {split_name} split.')
+    expected = int(split.get('num_samples', -1))
+    if expected != record_count:
+        raise ValueError(
+            f'Manifest expects {expected} {split_name} records, loaded '
+            f'{record_count}.')
+
+    client_by_index = {}
+    client_num = int(manifest.get('client_num', -1))
+    for client_id in range(1, client_num + 1):
+        for index in split.get('clients', {}).get(str(client_id), []):
+            index = int(index)
+            if index in client_by_index:
+                raise ValueError(f'Manifest repeats sample index {index}.')
+            client_by_index[index] = client_id
+    if sorted(client_by_index) != list(range(record_count)):
+        raise ValueError('Manifest must assign every evaluation record '
+                         'exactly once.')
+
+    checkpoint_distribution, distribution_source = \
+        _infer_checkpoint_distribution(args, cfg)
+    partition_type = manifest.get('partition_type', 'unknown')
+    reasons = []
+    if checkpoint_distribution not in ['unknown', partition_type]:
+        reasons.append('checkpoint_partition_mismatch')
+        if not args.allow_diagnostic_mismatch:
+            raise ValueError(
+                f'{checkpoint_distribution} checkpoint with {partition_type} '
+                'evaluation manifest is diagnostic only. Pass '
+                '--allow-diagnostic-mismatch to run it explicitly.')
+    if args.limit > 0:
+        reasons.append('limited_debug_evaluation')
+    return {
+        'manifest': manifest,
+        'path': os.path.abspath(args.partition_manifest),
+        'partition_type': partition_type,
+        'checkpoint_distribution': checkpoint_distribution,
+        'checkpoint_distribution_source': distribution_source,
+        'diagnostic_only': bool(reasons),
+        'diagnostic_reasons': reasons,
+        'client_by_index': client_by_index,
+        'client_num': client_num,
+    }
 
 
 def _json_records(path):
@@ -631,6 +740,102 @@ def _rerank_candidates(bot, cfg, record, candidates):
     return scored[0][1], scored
 
 
+def _ensure_parent(path):
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+
+
+def _partition_metrics(partition, client_totals, client_correct,
+                       client_exact):
+    clients = []
+    for client_id in range(1, partition['client_num'] + 1):
+        total = client_totals[client_id]
+        correct = client_correct[client_id]
+        exact_correct = client_exact[client_id]
+        clients.append({
+            'client_id': client_id,
+            'total': total,
+            'correct': correct,
+            'hit@1': 0.0 if total == 0 else 100.0 * correct / total,
+            'exact_correct': exact_correct,
+            'exact@1': 0.0 if total == 0 else
+            100.0 * exact_correct / total,
+        })
+    scores = [client['hit@1'] for client in clients]
+    total = sum(client_totals.values())
+    correct = sum(client_correct.values())
+    exact_correct = sum(client_exact.values())
+    return {
+        'clients': clients,
+        'macro_average': statistics.fmean(scores),
+        'weighted_global': 0.0 if total == 0 else 100.0 * correct / total,
+        'worst_client': min(scores),
+        'client_std': statistics.pstdev(scores),
+        'total': total,
+        'correct': correct,
+        'exact_correct': exact_correct,
+        'exact_global': 0.0 if total == 0 else
+        100.0 * exact_correct / total,
+    }
+
+
+def _write_partition_summaries(csv_path, json_path, metadata, metrics):
+    common = {
+        key: metadata[key]
+        for key in [
+            'dataset', 'split', 'checkpoint', 'data_file', 'base_model',
+            'total_params', 'trainable_params',
+            'partition_manifest', 'partition_type',
+            'checkpoint_distribution', 'checkpoint_distribution_source',
+            'diagnostic_only', 'diagnostic_reasons', 'match_mode'
+        ]
+    }
+    fieldnames = list(common.keys()) + [
+        'row_type', 'client_id', 'total', 'correct', 'hit@1',
+        'exact_correct', 'exact@1', 'macro_average', 'weighted_global',
+        'worst_client', 'client_std'
+    ]
+    with open(csv_path, 'w', encoding='utf-8', newline='') as fout:
+        writer = csv.DictWriter(fout, fieldnames=fieldnames)
+        writer.writeheader()
+        for client in metrics['clients']:
+            row = dict(common)
+            row.update({
+                'row_type': 'client',
+                'client_id': client['client_id'],
+                'total': client['total'],
+                'correct': client['correct'],
+                'hit@1': f'{client["hit@1"]:.6f}',
+                'exact_correct': client['exact_correct'],
+                'exact@1': f'{client["exact@1"]:.6f}',
+            })
+            writer.writerow(row)
+        row = dict(common)
+        row.update({
+            'row_type': 'aggregate',
+            'client_id': '',
+            'total': metrics['total'],
+            'correct': metrics['correct'],
+            'hit@1': f'{metrics["weighted_global"]:.6f}',
+            'exact_correct': metrics['exact_correct'],
+            'exact@1': f'{metrics["exact_global"]:.6f}',
+            'macro_average': f'{metrics["macro_average"]:.6f}',
+            'weighted_global': f'{metrics["weighted_global"]:.6f}',
+            'worst_client': f'{metrics["worst_client"]:.6f}',
+            'client_std': f'{metrics["client_std"]:.6f}',
+        })
+        writer.writerow(row)
+
+    payload = {
+        'schema_version': 1,
+        **metadata,
+        **metrics,
+    }
+    with open(json_path, 'w', encoding='utf-8', newline='\n') as fout:
+        json.dump(payload, fout, ensure_ascii=False, indent=2, sort_keys=True)
+        fout.write('\n')
+
+
 def main():
     args = parse_args()
     cfg = _load_cfg(args)
@@ -644,6 +849,8 @@ def main():
     split_path, records = _load_records(cfg, dataset_name, args.split,
                                         bot.tokenizer)
     records = _apply_instruction(records, args.instruction)
+    partition = _partition_context(args, cfg, dataset_name, args.split,
+                                   len(records))
     if args.limit > 0:
         records = records[:args.limit]
     candidate_map = _load_candidate_map(args.candidate_file)
@@ -662,8 +869,12 @@ def main():
         cfg.outdir, f'{dataset_name}_{args.split}_hit1_predictions.jsonl')
     summary_path = args.summary or os.path.join(
         cfg.outdir, f'{dataset_name}_{args.split}_hit1_summary.csv')
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+    partition_json_path = args.partition_summary_json or \
+        os.path.splitext(summary_path)[0] + '.json'
+    _ensure_parent(output_path)
+    _ensure_parent(summary_path)
+    if partition is not None:
+        _ensure_parent(partition_json_path)
 
     generation_kwargs = {
         'max_new_tokens': args.max_new_tokens,
@@ -683,6 +894,11 @@ def main():
 
     correct = 0
     exact_correct = 0
+    client_totals = {
+        client_id: 0 for client_id in range(1, partition['client_num'] + 1)
+    } if partition is not None else None
+    client_correct = dict(client_totals) if partition is not None else None
+    client_exact = dict(client_totals) if partition is not None else None
     with open(output_path, 'w', encoding='utf-8') as fout:
         for idx, record in enumerate(tqdm(records, desc='Evaluating hit@1')):
             candidates = _record_candidates(record, idx, candidate_map,
@@ -699,6 +915,12 @@ def main():
                 prediction, answers, args.match_mode)
             correct += hit
             exact_correct += exact_hit
+            client_id = partition['client_by_index'][idx] \
+                if partition is not None else None
+            if partition is not None:
+                client_totals[client_id] += 1
+                client_correct[client_id] += hit
+                client_exact[client_id] += exact_hit
             fout.write(
                 json.dumps(
                     {
@@ -711,6 +933,7 @@ def main():
                         'answers_norm': normalized_gold,
                         'hit': hit,
                         'exact_hit': exact_hit,
+                        'client_id': client_id,
                         'match_mode': args.match_mode,
                         'candidates': candidates,
                         'candidate_scores': candidate_scores[:10],
@@ -721,17 +944,37 @@ def main():
     hit1 = 0.0 if total == 0 else 100.0 * correct / total
     exact_hit1 = 0.0 if total == 0 else 100.0 * exact_correct / total
     total_params, trainable_params = _count_parameters(bot.model)
-    with open(summary_path, 'w', encoding='utf-8', newline='') as fout:
-        writer = csv.DictWriter(fout,
-                                fieldnames=[
-                                    'dataset', 'split', 'checkpoint',
-                                    'data_file', 'base_model', 'total_params',
-                                    'trainable_params', 'total', 'correct',
-                                    'hit@1', 'exact_correct', 'exact@1',
-                                    'match_mode'
-                                ])
-        writer.writeheader()
-        writer.writerow({
+    if partition is None:
+        with open(summary_path, 'w', encoding='utf-8', newline='') as fout:
+            writer = csv.DictWriter(fout,
+                                    fieldnames=[
+                                        'dataset', 'split', 'checkpoint',
+                                        'data_file', 'base_model',
+                                        'total_params', 'trainable_params',
+                                        'total', 'correct', 'hit@1',
+                                        'exact_correct', 'exact@1',
+                                        'match_mode'
+                                    ])
+            writer.writeheader()
+            writer.writerow({
+                'dataset': dataset_name,
+                'split': args.split,
+                'checkpoint': cfg.federate.save_to,
+                'data_file': split_path,
+                'base_model': cfg.model.type,
+                'total_params': total_params,
+                'trainable_params': trainable_params,
+                'total': total,
+                'correct': correct,
+                'hit@1': f'{hit1:.2f}',
+                'exact_correct': exact_correct,
+                'exact@1': f'{exact_hit1:.2f}',
+                'match_mode': args.match_mode,
+            })
+    else:
+        metrics = _partition_metrics(partition, client_totals,
+                                     client_correct, client_exact)
+        metadata = {
             'dataset': dataset_name,
             'split': args.split,
             'checkpoint': cfg.federate.save_to,
@@ -739,19 +982,32 @@ def main():
             'base_model': cfg.model.type,
             'total_params': total_params,
             'trainable_params': trainable_params,
-            'total': total,
-            'correct': correct,
-            'hit@1': f'{hit1:.2f}',
-            'exact_correct': exact_correct,
-            'exact@1': f'{exact_hit1:.2f}',
+            'partition_manifest': partition['path'],
+            'partition_type': partition['partition_type'],
+            'checkpoint_distribution': partition[
+                'checkpoint_distribution'],
+            'checkpoint_distribution_source': partition[
+                'checkpoint_distribution_source'],
+            'diagnostic_only': partition['diagnostic_only'],
+            'diagnostic_reasons': partition['diagnostic_reasons'],
             'match_mode': args.match_mode,
-        })
+        }
+        _write_partition_summaries(summary_path, partition_json_path,
+                                   metadata, metrics)
 
     print(f'{dataset_name.upper()} {args.split} hit@1: {hit1:.2f} '
           f'({correct}/{total})')
     print(f'Exact hit@1: {exact_hit1:.2f} ({exact_correct}/{total})')
     print(f'Predictions: {output_path}')
     print(f'Summary: {summary_path}')
+    if partition is not None:
+        print(f'Partition summary: {partition_json_path}')
+        print(f'Macro average: {metrics["macro_average"]:.2f}')
+        print(f'Worst client: {metrics["worst_client"]:.2f}')
+        print(f'Client std: {metrics["client_std"]:.2f}')
+        if partition['diagnostic_only']:
+            print('DIAGNOSTIC ONLY: ' +
+                  ', '.join(partition['diagnostic_reasons']))
 
 
 if __name__ == '__main__':

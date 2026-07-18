@@ -36,6 +36,7 @@ def get_splitter(config):
         scaffold	         Molecular
         scaffold_lda       	 Molecular
         rand_chunk	         Graph (graph-level)
+        partition_manifest  Generic (precomputed partitions)
         ===================  ================================================
     """
     client_num = config.federate.client_num
@@ -78,6 +79,10 @@ def get_splitter(config):
     elif config.data.splitter == 'meta':
         from federatedscope.core.splitters.generic import MetaSplitter
         splitter = MetaSplitter(client_num)
+    elif config.data.splitter == 'partition_manifest':
+        from federatedscope.core.splitters.generic import \
+            PartitionManifestSplitter
+        splitter = PartitionManifestSplitter(client_num, **kwargs)
     else:
         logger.warning(f'Splitter {config.data.splitter} not found or not '
                        f'used.')

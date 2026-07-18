@@ -858,6 +858,10 @@ class KGHybridEmbedding(nn.Module):
         entity_vocab_size = _resolve_cfg_value(kg_cfg, 'entity_vocab_size', 1)
         num_heads = _resolve_cfg_value(kg_cfg, 'num_heads', 4)
         dropout = _resolve_cfg_value(kg_cfg, 'dropout', 0.0)
+        self.use_hybrid_embedding = _resolve_cfg_value(
+            kg_cfg, 'use_hybrid_embedding', True)
+        self.use_initial_graph_token_injection = _resolve_cfg_value(
+            kg_cfg, 'use_initial_graph_token_injection', True)
 
         self.entity_embedding = nn.Embedding(entity_vocab_size,
                                              entity_hidden_size)
@@ -941,6 +945,12 @@ class KGHybridEmbedding(nn.Module):
         runtime_state['trip_states'] = None
         runtime_state['trip_mask'] = None
 
+        # Keep graph-state construction active when input injection is
+        # ablated: later adapter-side GNN/triple/joint reasoning still needs
+        # the same graph inputs. Only the initial graph-to-token path is cut.
+        if not self.use_initial_graph_token_injection:
+            return word_embeds
+
         token_entity_states = self._build_token_entity_states(
             kg_inputs,
             node_states,
@@ -997,7 +1007,7 @@ class KGHybridEmbedding(nn.Module):
         subword_index = kg_inputs.get('nid2swid', None)
         if subword_index is None:
             subword_index = kg_inputs.get('entity_subword_index', None)
-        if subword_index is not None:
+        if subword_index is not None and self.use_hybrid_embedding:
             subword_index = _as_tensor(subword_index,
                                        dtype=torch.long,
                                        device=device)
@@ -1074,7 +1084,7 @@ class KGHybridEmbedding(nn.Module):
         subword_index = kg_inputs.get('eid2swid', None)
         if subword_index is None:
             subword_index = kg_inputs.get('edge_subword_index', None)
-        if subword_index is not None:
+        if subword_index is not None and self.use_hybrid_embedding:
             subword_index = _as_tensor(subword_index,
                                        dtype=torch.long,
                                        device=device)
