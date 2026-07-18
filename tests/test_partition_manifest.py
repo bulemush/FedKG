@@ -132,6 +132,21 @@ def test_openbookqa_partition_is_explicitly_rejected(tmp_path):
         builder.load_dataset_labels('openbookqa', tmp_path)
 
 
+def test_cwq_manifest_mirrors_runtime_answer_filter():
+    builder = _load_builder()
+    source = REPO_ROOT / 'data' / 'CWQ' / \
+        'ComplexWebQuestions_train.json'
+    records = json.loads(source.read_text(encoding='utf-8'))
+    filtered = builder._filter_cwq_records(records, 'train')
+    assert len(records) == 27639
+    assert len(filtered) == 27625
+    manifest = json.loads((
+        NONIID_ROOT / 'manifests' /
+        'cwq_noniid_alpha0p5_seed12345.json').read_text(encoding='utf-8'))
+    assert manifest['splits']['train']['num_samples'] == len(filtered)
+    assert 'excluded 14 source records' in manifest['split_notes']['train']
+
+
 def test_comparison_rejects_diagnostic_results_and_computes_drops(tmp_path):
     comparator = _load_comparator()
 

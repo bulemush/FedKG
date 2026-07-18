@@ -244,3 +244,30 @@ python "$PROJECT_ROOT/fedbiot_script/fedbiot/noniid/verify_experiment_isolation.
 
 训练开始后不要使用 manifest 生成器的 `--force`。若需要更换划分，必须使用
 新的 manifest 文件名、checkpoint 路径和结果目录。
+
+## 9. CWQ manifest 长度错误排查
+
+当前 CWQ 运行时加载器会过滤 14 条没有有效 `answer` 值的训练记录，因此正确
+训练长度是 `27625`，不是原始 JSON 的 `27639`。若出现下面的错误：
+
+```text
+ValueError: train dataset length is 27625, but manifest expects 27639.
+```
+
+说明服务器仍在使用旧 manifest。该错误发生在正式训练开始之前，可以安全替换
+manifest。更新代码后，在项目根目录重新生成 CWQ 的 IID 和 Non-IID manifest：
+
+```bash
+PROJECT_ROOT="$(pwd -P)"
+python "$PROJECT_ROOT/fedbiot_script/fedbiot/noniid/build_partition_manifests.py" \
+  --datasets cwq \
+  --partition-types iid noniid \
+  --data-root "$PROJECT_ROOT/data" \
+  --output-dir "$PROJECT_ROOT/fedbiot_script/fedbiot/noniid/manifests" \
+  --force
+```
+
+更新后的 `cwq_noniid_alpha0p5_seed12345.json` 应满足：
+
+- `splits.train.num_samples = 27625`
+- SHA-256：`063B3E8057F2840CC6C48B6BEC744C125955D094599A13D25C80645445334B2D`

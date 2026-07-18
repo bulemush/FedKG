@@ -48,9 +48,14 @@ def _sha256(path):
 
 
 def _source_entry(path):
+    resolved = Path(path).resolve()
+    try:
+        portable_path = resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        portable_path = resolved.as_posix()
     return {
-        'path': Path(path).as_posix(),
-        'size_bytes': Path(path).stat().st_size,
+        'path': portable_path,
+        'size_bytes': resolved.stat().st_size,
         'sha256': _sha256(path),
     }
 
@@ -60,6 +65,45 @@ def _cwq_label(record):
     if value in [None, '']:
         raise ValueError('CWQ record is missing compositionality_type.')
     return str(value)
+
+
+def _cwq_answers(record):
+    """Mirror task_datasets._extract_cwq_answers exactly.
+
+    In particular, an existing ``answer`` key whose value is ``None`` does
+    not fall back to ``answer_id`` in the current loader.  The manifest must
+    reproduce that behavior to keep its indices aligned with LLMDataset.
+    """
+    raw_answers = record.get('answers', record.get('answer', []))
+    answers = []
+    if isinstance(raw_answers, list):
+        for answer in raw_answers:
+            if isinstance(answer, dict):
+                value = answer.get(
+                    'answer',
+                    answer.get('answer_id', answer.get('entity_name', None)))
+            else:
+                value = answer
+            if value not in [None, '']:
+                answers.append(str(value))
+    elif raw_answers not in [None, '']:
+        answers.append(str(raw_answers))
+    return list(dict.fromkeys(answers))
+
+
+def _filter_cwq_records(records, split_name):
+    filtered = []
+    for record in records:
+        question = record.get(
+            'question',
+            record.get('machine_question',
+                       record.get('webqsp_question', None)))
+        if question is None:
+            continue
+        if not _cwq_answers(record) and split_name != 'test':
+            continue
+        filtered.append(record)
+    return filtered
 
 
 def _kqapro_label(record):
@@ -105,12 +149,30 @@ def load_dataset_labels(dataset, data_root):
             'val': root / 'CWQ' / 'ComplexWebQuestions_dev.json',
             'test': root / 'CWQ' / 'ComplexWebQuestions_test.json',
         }
-        records = {name: _read_json(path) for name, path in paths.items()}
+        raw_records = {
+            name: _read_json(path) for name, path in paths.items()
+        }
+        records = {
+            name: _filter_cwq_records(split_records, name)
+            for name, split_records in raw_records.items()
+        }
         labels = {
             name: [_cwq_label(record) for record in split_records]
             for name, split_records in records.items()
         }
-        notes = {'test': 'Official test is unlabeled and is not reported.'}
+        filtered_counts = {
+            name: len(raw_records[name]) - len(records[name])
+            for name in raw_records
+        }
+        notes = {
+            'train': f'Applied the runtime CWQ formatter filter; excluded '
+                     f'{filtered_counts["train"]} source records.',
+            'val': f'Applied the runtime CWQ formatter filter; excluded '
+                   f'{filtered_counts["val"]} source records.',
+            'test': 'Official test is unlabeled and is not reported; applied '
+                    f'the runtime question filter and excluded '
+                    f'{filtered_counts["test"]} source records.',
+        }
     elif dataset == 'kqapro':
         paths = {
             'train': root / 'kqa_pro' / 'train.json',
