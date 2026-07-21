@@ -1,0 +1,125 @@
+use_gpu: True
+device: 0
+outdir: "exp/hit3_iid/kqapro"
+early_stop:
+  patience: 0
+federate:
+  mode: standalone
+  client_num: 3
+  total_round_num: 200
+  save_to: "checkpoints/hit3_iid/kqapro/llama.kqapro.webqsp.kg_adpt2.dp2.hit3.fedbiot.ckpt"
+  save_freq: 10
+  share_local_model: True
+  online_aggr: False
+data:
+  root: data/
+  type: 'kqa_pro@llm'
+  splits: [0.8, 0.1, 0.1]
+  splitter: 'iid'
+  args: [ {
+    'train_file': 'kqa_pro/train.json',
+    'val_file': 'kqa_pro/val.json',
+    'test_file': 'kqa_pro/test.json'
+  } ]
+llm:
+  grad_accum_step: 2
+  tok_len: 1024
+  chat:
+    max_len: 300
+  model_parallel:
+    use: True
+    device_map: 'balanced_layers'
+    coexisting_model_ratio: 0.45
+    max_memory:
+      '0': '14GiB'
+      '1': '22GiB'
+    same_device_map: False
+  adapter:
+    use: True
+    args: [ { 'adapter_package': 'peft', 'adapter_method': 'lora', 'r': 8, 'lora_alpha': 16, 'lora_dropout': 0.05 } ]
+  kg_adapter:
+    use: True
+    entity_vocab_size: 50000
+    edge_vocab_size: 50000
+    entity_hidden_size: 256
+    num_heads: 4
+    dropout: 0.05
+    gnn_backend: 'paper'
+    paper_gnn_path: 'federatedscope/llm/kg_adapter/paper_gnn/GNN.py'
+    use_srgat: False
+    num_relations: 8192
+    keep_ratio: 1.0
+    max_node_num_per_batch: 2500
+    use_edge_emb: True
+    use_gnn: True
+    use_trips: True
+    use_joint_reasoning: True
+    adapter_last_n: 0
+  offsite_tuning:
+    use: True
+    save_full_model: True
+    emu_l: 0
+    emu_r: 30
+    strategy: 'drop_layer'
+    kwargs: [ { 'drop_ratio': 0.2 }]
+    emu_align:
+      use: True
+      initial_only: True
+      periodic: True
+      periodic_interval: 5
+      periodic_start_round: 5
+      periodic_save: False
+      sim_loss: 'l2'
+      layerwise_distill: False
+      kl_divergence: 'raw'
+      data:
+        root: data/
+        type: 'webquestionssp@llm'
+        splits: [0.9, 0.1, 0.0]
+        splitter: 'iid'
+        args: [ {
+          'train_file': 'WebQSP/data/WebQSP.train.json',
+          'test_file': 'WebQSP/data/WebQSP.test.json'
+        } ]
+      train:
+        local_update_steps: 5
+        initial_update_rounds: 50
+        lm_loss_weight: 0.0
+        kd_loss_weight: 0.9
+        optimizer:
+          type: SGD
+          lr: 0.001
+dataloader:
+  batch_size: 3
+model:
+  type: '/home/async/data-disk/wgh/FedKG/federatedscope/llm/data/models/Llama-2-7b-hf@huggingface_llm'
+train:
+  local_update_steps: 30
+  batch_or_epoch: batch
+  optimizer:
+    type: AdamW
+    lr: 0.0001
+    betas: (0.9, 0.95)
+  is_enable_half: True
+grad:
+  grad_clip: 1.0
+criterion:
+  type: CrossEntropyLoss
+trainer:
+  type: llmtrainer
+eval:
+  freq: 5
+  metrics: ['loss']
+  best_res_update_round_wise_key: 'val_loss'
+  kgqa:
+    split: 'val'
+    match_mode: 'contains'
+    select_metric: 'hit@3'
+    hits_k: [1, 3]
+    num_beams: 3
+    max_new_tokens: 32
+    temperature: 0.0
+    top_p: 1.0
+  report: ['weighted_avg', 'avg', 'raw']
+  count_flops: False
+expname: "fedbiot/hit3_iid/llama-7b_kqapro_webqsp_offsite_kg_adpt2_dp2"
