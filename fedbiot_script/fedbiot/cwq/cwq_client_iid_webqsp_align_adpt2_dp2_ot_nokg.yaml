@@ -7,7 +7,7 @@ federate:
   client_num: 1
   total_round_num: 200
   save_to: "checkpoints/llama.cwq.webqsp.adpt2.dp2.fedot_nokg.ckpt"
-  save_freq: 100
+  save_freq: 50
   share_local_model: True
   online_aggr: False
 data:
@@ -57,7 +57,7 @@ criterion:
 trainer:
   type: llmtrainer
 eval:
-  freq: 50
+  freq: 10
   metrics: ['loss']
   best_res_update_round_wise_key: 'val_loss'
   kgqa:

@@ -4,6 +4,22 @@
 Non-IID 实验。训练仍使用验证损失选择 checkpoint；`select_metric:
 hit@3` 用于记录最终报告指标，不会把训练目标改成 Hit@3。
 
+## 配置矩阵
+
+下列 YAML 都使用相同的 IID 数据划分、验证集和 Hit@3 评估口径，并
+分别写入 `checkpoints/hit3_iid/<method>/<dataset>/` 与
+`exp/hit3_iid/<method>/<dataset>/`，因此可直接用于三种方法的公平比较。
+
+| 数据集 | OT（1 客户端） | FedOT（3 客户端） | FedBiOT（3 客户端 + emulator alignment） |
+| --- | --- | --- | --- |
+| CWQ | `cwq_ot_hit3.yaml` | `cwq_fedot_hit3.yaml` | `cwq_fedbiot_hit3.yaml` |
+| KQA Pro | `kqapro_ot_hit3.yaml` | `kqapro_fedot_hit3.yaml` | `kqapro_fedbiot_hit3.yaml` |
+| GraphQuestions | `graphquestions_ot_hit3.yaml` | `graphquestions_fedot_hit3.yaml` | `graphquestions_fedbiot_hit3.yaml` |
+
+这些九份配置均在当前目录 `fedbiot_script/fedbiot/hit3_iid/` 下。此前
+新增的 `*_kg_adpt2_dp2_hit3.yaml` 是带 KG-Adapter 的额外 FedBiOT-KG
+变体，和此处的三方法无 KG 基线不应混在同一主对比表中。
+
 ## 指标定义
 
 - 自由生成：使用确定性 beam search，取按模型排序的前三条完整答案。
@@ -17,6 +33,18 @@ CWQ 和 KQA Pro 使用带答案的 validation split。GraphQuestions 继续使�
 gold answer 的官方 test split 上报告 Hit@3。
 
 ## 1. 训练
+
+### 三方法对比（OT / FedOT / FedBiOT）
+
+将以下模板中的 `CONFIG` 替换为上表的完整配置路径；例如
+`fedbiot_script/fedbiot/hit3_iid/cwq_fedot_hit3.yaml`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=$PWD python federatedscope/main.py \
+  --cfg CONFIG
+```
+
+### 可选：带 KG-Adapter 的 FedBiOT-KG 变体
 
 在项目根目录依次执行：
 

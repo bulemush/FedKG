@@ -7,7 +7,7 @@ federate:
   client_num: 1
   total_round_num: 500
   save_to: "checkpoints/llama.dolly.dp5.lr1.central.ckpt"
-  save_freq: 100
+  save_freq: 50
   share_local_model: True
   online_aggr: False
 data:
@@ -31,7 +31,7 @@ llm:
     strategy: 'drop_layer'
     kwargs: [ { 'drop_ratio': 0.5 }]
 dataloader:
-  batch_size: 5
+  batch_size: 1
 model:
   type: 'meta-llama/Llama-2-7b-hf@huggingface_llm'
 train:
@@ -47,7 +47,7 @@ criterion:
 trainer:
   type: llmtrainer
 eval:
-  freq: 100
+  freq: 10
   metrics: ['loss']
   best_res_update_round_wise_key: 'test_loss'
   report: ['weighted_avg', 'avg', 'raw']

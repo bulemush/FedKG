@@ -7,7 +7,7 @@ federate:
   client_num: 3
   total_round_num: 200
   save_to: "checkpoints/kqapro/llama.kqapro.webqsp.kg_adpt2.dp5.fedbiot.ckpt"
-  save_freq: 10
+  save_freq: 50
   share_local_model: True
   online_aggr: False
 data:
@@ -30,7 +30,7 @@ llm:
     device_map: 'balanced_layers'
     coexisting_model_ratio: 0.45
     max_memory:
-      '0': '14GiB'
+      '0': '12GiB'
       '1': '22GiB'
     same_device_map: False
   adapter:
@@ -89,7 +89,7 @@ llm:
           type: SGD
           lr: 0.001
 dataloader:
-  batch_size: 3
+  batch_size: 1
 model:
   type: '/home/async/data-disk/wgh/FedKG/federatedscope/llm/data/models/Llama-2-7b-hf@huggingface_llm'
 train:
@@ -107,7 +107,7 @@ criterion:
 trainer:
   type: llmtrainer
 eval:
-  freq: 5
+  freq: 10
   metrics: ['loss']
   best_res_update_round_wise_key: 'val_loss'
   kgqa:
