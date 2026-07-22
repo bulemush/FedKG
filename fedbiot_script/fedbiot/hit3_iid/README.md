@@ -44,6 +44,13 @@ CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=$PWD python federatedscope/main.py \
   --cfg CONFIG
 ```
 
+训练前先创建 checkpoint 目录（框架保存 checkpoint 时不会自动创建其父目录）：
+
+```bash
+mkdir -p checkpoints/hit3_iid/{ot,fedot,fedbiot}/{cwq,kqapro,graphquestions}
+mkdir -p exp/hit3_iid/{ot,fedot,fedbiot}/{cwq,kqapro,graphquestions}
+```
+
 ### 可选：带 KG-Adapter 的 FedBiOT-KG 变体
 
 在项目根目录依次执行：

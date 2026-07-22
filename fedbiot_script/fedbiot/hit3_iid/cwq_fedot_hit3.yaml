@@ -39,7 +39,7 @@ model:
 train:
   local_update_steps: 30
   batch_or_epoch: batch
-  optimizer: {type: AdamW, lr: 0.0001, betas: (0.9, 0.95)}
+  optimizer: {type: AdamW, lr: 0.0001, betas: [0.9, 0.95]}
   is_enable_half: True
 criterion: {type: CrossEntropyLoss}
 trainer: {type: llmtrainer}
