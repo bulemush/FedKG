@@ -330,25 +330,36 @@ def _get_layer_prefixes(adapter_model):
     return prefixes
 
 
-def _get_trainable_state_keys(adapter_model):
-    trainable_param_names = {
+def _get_transfer_state_keys(adapter_model):
+    """Collect adapter states that must be restored into the full model.
+
+    The emulator/student is frozen again after alignment, so filtering only by
+    ``requires_grad`` drops its learned LoRA parameters during standalone full
+    evaluation.  ``get_student_state_dict`` deliberately retains those
+    adapter-pattern parameters even while the student is frozen.
+    """
+    model_state = adapter_model.model.state_dict()
+    transfer_keys = {
         name
         for name, param in adapter_model.model.named_parameters()
         if param.requires_grad
     }
-    model_state = adapter_model.model.state_dict()
-    return {
-        name
-        for name in trainable_param_names
-        if name in model_state
-    }
+    if hasattr(adapter_model, 'get_student_state_dict'):
+        transfer_keys.update(adapter_model.get_student_state_dict().keys())
+    return {name for name in transfer_keys if name in model_state}
 
 
-def _copy_state_by_layer_mapping(raw_model, adap_model, trainable_keys):
-    adapter_layer_mapping = getattr(adap_model,
-                                    'offsite_adapter_layer_mapping',
-                                    None)
-    if not adapter_layer_mapping:
+def _copy_state_by_layer_mapping(raw_model, adap_model, transfer_keys):
+    layer_mapping = getattr(adap_model, 'offsite_layer_mapping', None)
+    if layer_mapping is None:
+        # Backward compatibility for adapter models created before the full
+        # emulator-to-teacher mapping was recorded.
+        layer_mapping = getattr(adap_model,
+                                'offsite_adapter_layer_mapping',
+                                None)
+    if isinstance(layer_mapping, (list, tuple)):
+        layer_mapping = dict(enumerate(layer_mapping))
+    if not layer_mapping:
         return 0
 
     raw_prefixes = _get_layer_prefixes(raw_model)
@@ -358,7 +369,7 @@ def _copy_state_by_layer_mapping(raw_model, adap_model, trainable_keys):
     new_raw_state = copy.copy(raw_state)
     copied = 0
 
-    for adap_layer_idx, raw_layer_idx in adapter_layer_mapping.items():
+    for adap_layer_idx, raw_layer_idx in layer_mapping.items():
         adap_prefix = adap_prefixes.get(adap_layer_idx, None)
         raw_prefix = raw_prefixes.get(raw_layer_idx, None)
         if adap_prefix is None or raw_prefix is None:
@@ -372,7 +383,7 @@ def _copy_state_by_layer_mapping(raw_model, adap_model, trainable_keys):
         for src_key, src_value in adap_state.items():
             if not src_key.startswith(src_prefix):
                 continue
-            if src_key not in trainable_keys:
+            if src_key not in transfer_keys:
                 continue
             dst_key = dst_prefix + src_key[len(src_prefix):]
             dst_value = raw_state.get(dst_key, None)
@@ -392,7 +403,7 @@ def _copy_state_by_layer_mapping(raw_model, adap_model, trainable_keys):
     return copied
 
 
-def _copy_global_trainable_state(raw_model, adap_model, trainable_keys):
+def _copy_global_trainable_state(raw_model, adap_model, transfer_keys):
     adap_prefixes = _get_layer_prefixes(adap_model)
     layer_prefixes = tuple(prefix + '.' for prefix in adap_prefixes.values())
     raw_state = raw_model.model.state_dict()
@@ -400,7 +411,7 @@ def _copy_global_trainable_state(raw_model, adap_model, trainable_keys):
     new_raw_state = copy.copy(raw_state)
     copied = 0
 
-    for src_key in trainable_keys:
+    for src_key in transfer_keys:
         if src_key.startswith(layer_prefixes):
             continue
         src_value = adap_state[src_key]
@@ -432,11 +443,11 @@ def load_adapter_state_from_adap_model(raw_model, adap_model):
         raise AttributeError('Both raw_model and adap_model must have an '
                              '`adapter` attribute.')
 
-    trainable_keys = _get_trainable_state_keys(adap_model)
+    transfer_keys = _get_transfer_state_keys(adap_model)
     copied_by_mapping = _copy_state_by_layer_mapping(raw_model, adap_model,
-                                                     trainable_keys)
+                                                     transfer_keys)
     copied_global = _copy_global_trainable_state(raw_model, adap_model,
-                                                 trainable_keys)
+                                                 transfer_keys)
     if copied_by_mapping > 0 or copied_global > 0:
         copied_total = copied_by_mapping + copied_global
         logger.info('Loaded %s tensors into full model (%s layer-mapped, '
